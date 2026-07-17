@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{Linear.Client, Linear.Issue, LoopStore}
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -26,11 +26,40 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   }
 
+  @loop_checkpoint_tool "symphony_loop_checkpoint"
+  @loop_checkpoint_description """
+  Persist one structured observe-orient-act-verify-learn-handoff checkpoint to Symphony's local
+  SQLite loop memory. Use stable checkpoint_key values so retries update instead of duplicate.
+  """
+  @loop_checkpoint_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["checkpoint_key", "phase", "summary", "decision", "evidence", "next_action", "outcome"],
+    "properties" => %{
+      "checkpoint_key" => %{"type" => "string", "description" => "Stable idempotency key within this issue."},
+      "phase" => %{"type" => "string", "enum" => ~w(observe orient act verify learn handoff)},
+      "goal_alignment" => %{"type" => ["string", "null"], "enum" => ["aligned", "adjusted", "rejected", nil]},
+      "summary" => %{"type" => "string", "description" => "Observed state or result."},
+      "decision" => %{"type" => "string", "description" => "Decision made from the observed feedback."},
+      "evidence" => %{
+        "type" => "array",
+        "items" => %{"type" => "string"},
+        "maxItems" => 50,
+        "description" => "Concrete tests, metrics, hashes, paths, commits, or Linear references."
+      },
+      "next_action" => %{"type" => "string", "description" => "The next bounded action or stop rationale."},
+      "outcome" => %{"type" => "string", "enum" => ~w(continue done rejected blocked retry)}
+    }
+  }
+
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @loop_checkpoint_tool ->
+        execute_loop_checkpoint(arguments, opts)
 
       other ->
         failure_response(%{
@@ -49,6 +78,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => @loop_checkpoint_tool,
+        "description" => @loop_checkpoint_description,
+        "inputSchema" => @loop_checkpoint_input_schema
       }
     ]
   end
@@ -63,6 +97,32 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
     end
+  end
+
+  defp execute_loop_checkpoint(arguments, opts) do
+    issue = Keyword.get(opts, :issue)
+    turn_number = Keyword.get(opts, :turn_number, 1)
+    recorder = Keyword.get(opts, :loop_recorder, &LoopStore.record_checkpoint/3)
+
+    case issue do
+      %Issue{} ->
+        case recorder.(issue, arguments, turn_number) do
+          {:ok, checkpoint} -> dynamic_tool_response(true, encode_payload(checkpoint))
+          {:error, reason} -> failure_response(loop_checkpoint_error(reason))
+        end
+
+      _ ->
+        failure_response(loop_checkpoint_error(:missing_issue_context))
+    end
+  end
+
+  defp loop_checkpoint_error(reason) do
+    %{
+      "error" => %{
+        "message" => "Symphony loop checkpoint was not recorded.",
+        "reason" => inspect(reason)
+      }
+    }
   end
 
   defp normalize_linear_graphql_arguments(arguments) when is_binary(arguments) do

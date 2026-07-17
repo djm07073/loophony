@@ -1,6 +1,127 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.{LoopStore, ReviewDecision}
+
+  test "scheduled review reports to Linear, blocks safe completion, and resumes after feedback" do
+    review_db =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-review-gate-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    on_exit(fn -> File.rm_rf(review_db) end)
+
+    review_issue = %Issue{
+      id: "review-issue",
+      identifier: "QNT-REVIEW",
+      title: "Goal review",
+      state: "Todo",
+      labels: []
+    }
+
+    work_issue = %Issue{
+      id: "work-issue",
+      identifier: "QNT-10",
+      title: "Validate liquidity",
+      state: "Ready",
+      labels: ["symphony-quant"],
+      url: "https://example.org/issues/QNT-10"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [review_issue, work_issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["symphony-quant"],
+      tracker_active_states: ["Ready", "In Progress"],
+      loop_database_path: review_db,
+      review_enabled: true,
+      review_issue_identifier: "QNT-REVIEW",
+      review_reviewer: "@owner",
+      poll_interval_ms: 60_000,
+      max_concurrent_agents: 1
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :ReviewGateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    assert_receive {:memory_tracker_comment, "review-issue", report}, 2_000
+    assert report =~ "Scheduled Goal Review"
+    assert report =~ "@owner"
+    assert report =~ "QNT-10"
+
+    snapshot = wait_for_snapshot(pid, &match?(%{review_gate: %{status: "open"}}, &1))
+    assert snapshot.running == []
+    assert Enum.map(snapshot.queued, & &1.identifier) == ["QNT-10"]
+
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+    worker_ref = make_ref()
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: worker_ref,
+      identifier: work_issue.identifier,
+      issue: %{work_issue | state: "In Progress"},
+      session_id: "review-safe-turn",
+      worker_host: nil,
+      workspace_path: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: %{work_issue.id => running_entry},
+          claimed: MapSet.put(state.claimed, work_issue.id)
+      }
+    end)
+
+    send(pid, {:DOWN, worker_ref, :process, worker_pid, :normal})
+
+    blocked =
+      wait_for_snapshot(pid, fn snapshot ->
+        match?([%{block_type: :review_gate}], snapshot.blocked)
+      end)
+
+    assert [%{issue_id: "work-issue", block_type: :review_gate}] = blocked.blocked
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [review_issue])
+
+    assert {:ok, decision} =
+             ReviewDecision.submit(
+               %{
+                 "decision" => "maintain",
+                 "feedback" => "Keep the goal; validate liquidity next."
+               },
+               orchestrator: orchestrator_name
+             )
+
+    assert decision.gate.status == "resolved"
+    assert_receive {:memory_tracker_comment, "review-issue", decision_comment}
+    assert decision_comment =~ "Goal Review Decision"
+
+    resumed =
+      wait_for_snapshot(pid, fn snapshot ->
+        snapshot.blocked == [] and snapshot.review_gate.status == "resolved"
+      end)
+
+    assert resumed.running == []
+    assert LoopStore.review_context() =~ "validate liquidity next"
+    Process.exit(worker_pid, :kill)
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()

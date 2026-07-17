@@ -75,6 +75,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     def handle_call(:request_refresh, _from, state) do
       {:reply, Keyword.get(state, :refresh, :unavailable), state}
     end
+
+    def handle_call(:resume_after_review, _from, state) do
+      {:reply, %{resumed: true, requested_at: DateTime.utc_now()}, state}
+    end
   end
 
   setup do
@@ -192,6 +196,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_candidate_issues()
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
+
+    assert {:ok, %{id: "issue-1", identifier: "MT-1"}} =
+             SymphonyElixir.Tracker.resolve_issue("mt-1")
+
+    assert {:error, :issue_not_found} = SymphonyElixir.Tracker.resolve_issue("MT-MISSING")
     assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
@@ -216,6 +225,30 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, ["issue-1"]} = Adapter.fetch_issue_states_by_ids(["issue-1"])
     assert_receive {:fetch_issue_states_by_ids_called, ["issue-1"]}
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "id" => "issue-1",
+             "identifier" => "MT-1",
+             "url" => "https://example.org/MT-1"
+           }
+         }
+       }}
+    )
+
+    assert {:ok, %{id: "issue-1", identifier: "MT-1"}} = Adapter.resolve_issue("MT-1")
+    assert_receive {:graphql_called, resolve_query, %{issueIdentifier: "MT-1"}}
+    assert resolve_query =~ "SymphonyResolveIssue"
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issue" => nil}}})
+    assert {:error, :issue_not_found} = Adapter.resolve_issue("MT-MISSING")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :boom})
+    assert {:error, :boom} = Adapter.resolve_issue("MT-ERROR")
 
     Process.put(
       {FakeLinearClient, :graphql_result},
@@ -342,7 +375,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
+             "counts" => %{"running" => 1, "queued" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -358,6 +391,16 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
                  "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+               }
+             ],
+             "queued" => [
+               %{
+                 "issue_id" => "issue-queued",
+                 "issue_identifier" => "MT-QUEUED",
+                 "issue_url" => "https://example.org/issues/MT-QUEUED",
+                 "state" => "Ready",
+                 "priority" => 2,
+                 "created_at" => state_payload["queued"] |> List.first() |> Map.fetch!("created_at")
                }
              ],
              "retrying" => [
@@ -385,16 +428,37 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
                  "last_event" => "turn_input_required",
                  "last_message" => "turn blocked: waiting for user input",
-                 "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
+                 "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at"),
+                 "block_type" => nil
                }
              ],
+             "loop" => %{
+               "available" => true,
+               "total_checkpoints" => 1,
+               "outcomes" => %{"continue" => 1},
+               "recent" => [
+                 %{
+                   "issue_identifier" => "MT-HTTP",
+                   "phase" => "verify",
+                   "decision" => "Keep the hypothesis",
+                   "next_action" => "Create the next issue",
+                   "outcome" => "continue"
+                 }
+               ]
+             },
+             "review_gate" => nil,
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "polling" => %{
+               "checking" => false,
+               "next_poll_in_ms" => 1_200_000,
+               "poll_interval_ms" => 1_200_000
+             }
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -421,8 +485,21 @@ defmodule SymphonyElixir.ExtensionsTest do
                "last_event_at" => nil,
                "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
              },
+             "queue" => nil,
              "retry" => nil,
              "blocked" => nil,
+             "loop" => %{
+               "recent" => [
+                 %{
+                   "issue_identifier" => "MT-HTTP",
+                   "phase" => "verify",
+                   "decision" => "Keep the hypothesis",
+                   "next_action" => "Create the next issue",
+                   "outcome" => "continue"
+                 }
+               ]
+             },
+             "review_gate" => nil,
              "logs" => %{"codex_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
@@ -433,6 +510,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
              json_response(conn, 200)
+
+    assert %{"status" => "queued", "queue" => %{"state" => "Ready", "priority" => 2}} =
+             json_response(get(build_conn(), "/api/v1/MT-QUEUED"), 200)
 
     conn = get(build_conn(), "/api/v1/MT-BLOCKED")
 
@@ -458,6 +538,134 @@ defmodule SymphonyElixir.ExtensionsTest do
              json_response(conn, 202)
   end
 
+  test "operator input writes a durable Linear comment and explicitly resumes blocked work" do
+    orchestrator_name = Module.concat(__MODULE__, :OperatorInputOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll", "reconcile"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    denied =
+      post(build_conn(), "/api/v1/operator-input", %{
+        "kind" => "instruction",
+        "message" => "Re-check costs"
+      })
+
+    assert json_response(denied, 403)["error"]["code"] == "operator_access_denied"
+
+    accepted =
+      build_conn()
+      |> Plug.Conn.put_req_header("x-symphony-control", "codex-app")
+      |> post("/api/v1/operator-input", %{
+        "kind" => "goal_adjustment",
+        "message" => "Narrow the universe to liquid US equities.",
+        "request_id" => "request-1"
+      })
+      |> json_response(202)
+
+    assert %{
+             "accepted" => true,
+             "request_id" => "request-1",
+             "kind" => "goal_adjustment",
+             "issue_id" => "issue-http",
+             "issue_identifier" => "MT-HTTP",
+             "delivery" => "next_checkpoint",
+             "resumed_to" => nil,
+             "refresh" => %{"queued" => true}
+           } = accepted
+
+    assert_receive {:memory_tracker_comment, "issue-http", comment}
+    assert comment =~ "## Human Input"
+    assert comment =~ "symphony-human-input:request-1"
+    assert comment =~ "Narrow the universe"
+
+    resumed =
+      build_conn()
+      |> Plug.Conn.put_req_header("x-symphony-control", "codex-app")
+      |> post("/api/v1/operator-input", %{
+        "kind" => "unblock",
+        "message" => "The missing decision is approved.",
+        "issue_identifier" => "MT-BLOCKED",
+        "request_id" => "request-2"
+      })
+      |> json_response(202)
+
+    assert resumed["resumed_to"] == "Ready"
+    assert_receive {:memory_tracker_comment, "issue-blocked", unblock_comment}
+    assert unblock_comment =~ "Kind: `unblock`"
+    assert_receive {:memory_tracker_state_update, "issue-blocked", "Ready"}
+  end
+
+  test "scheduled review decision requires local authorization and resumes the gate" do
+    review_db =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-review-http-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
+    on_exit(fn -> File.rm_rf(review_db) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      loop_database_path: review_db,
+      review_enabled: true,
+      review_issue_identifier: "QNT-REVIEW",
+      review_reviewer: "@owner"
+    )
+
+    review_issue = %Issue{id: "review-http", identifier: "QNT-REVIEW", state: "Todo"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [review_issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    assert {:ok, %{status: "open"}} = SymphonyElixir.LoopStore.ensure_review_gate()
+
+    orchestrator_name = Module.concat(__MODULE__, :ReviewDecisionOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    denied =
+      post(build_conn(), "/api/v1/review-decision", %{
+        "decision" => "maintain",
+        "feedback" => "Keep the goal."
+      })
+
+    assert json_response(denied, 403)["error"]["code"] == "operator_access_denied"
+
+    accepted =
+      build_conn()
+      |> Plug.Conn.put_req_header("x-symphony-control", "codex-app")
+      |> post("/api/v1/review-decision", %{
+        "decision" => "adjust",
+        "feedback" => "Raise the liquidity floor."
+      })
+      |> json_response(202)
+
+    assert accepted["accepted"] == true
+    assert accepted["decision"] == "adjust"
+    assert accepted["gate"]["status"] == "resolved"
+    assert accepted["resume"]["resumed"] == true
+    assert_receive {:memory_tracker_comment, "review-http", comment}
+    assert comment =~ "Raise the liquidity floor"
+  end
+
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
@@ -466,6 +674,12 @@ defmodule SymphonyElixir.ExtensionsTest do
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
     assert json_response(get(build_conn(), "/api/v1/refresh"), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
+
+    assert json_response(get(build_conn(), "/api/v1/operator-input"), 405) ==
+             %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
+
+    assert json_response(get(build_conn(), "/api/v1/review-decision"), 405) ==
              %{"error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}}
 
     assert json_response(post(build_conn(), "/", %{}), 405) ==
@@ -690,7 +904,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+
+    assert response.body["counts"] == %{
+             "running" => 1,
+             "queued" => 1,
+             "retrying" => 1,
+             "blocked" => 1
+           }
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -752,6 +972,16 @@ defmodule SymphonyElixir.ExtensionsTest do
           started_at: DateTime.utc_now()
         }
       ],
+      queued: [
+        %{
+          issue_id: "issue-queued",
+          identifier: "MT-QUEUED",
+          issue_url: "https://example.org/issues/MT-QUEUED",
+          state: "Ready",
+          priority: 2,
+          created_at: DateTime.utc_now()
+        }
+      ],
       retrying: [
         %{
           issue_id: "issue-retry",
@@ -782,8 +1012,23 @@ defmodule SymphonyElixir.ExtensionsTest do
           last_codex_timestamp: DateTime.utc_now()
         }
       ],
+      loop: %{
+        available: true,
+        total_checkpoints: 1,
+        outcomes: %{"continue" => 1},
+        recent: [
+          %{
+            issue_identifier: "MT-HTTP",
+            phase: "verify",
+            decision: "Keep the hypothesis",
+            next_action: "Create the next issue",
+            outcome: "continue"
+          }
+        ]
+      },
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      rate_limits: %{"primary" => %{"remaining" => 11}},
+      polling: %{checking?: false, next_poll_in_ms: 1_200_000, poll_interval_ms: 1_200_000}
     }
   end
 

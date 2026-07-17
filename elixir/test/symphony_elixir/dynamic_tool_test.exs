@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
-  test "tool_specs advertises the linear_graphql input contract" do
+  test "tool_specs advertises Linear and loop checkpoint contracts" do
     assert [
              %{
                "description" => description,
@@ -16,10 +16,37 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "type" => "object"
                },
                "name" => "linear_graphql"
+             },
+             %{
+               "description" => loop_description,
+               "inputSchema" => %{
+                 "properties" => %{
+                   "checkpoint_key" => _,
+                   "decision" => _,
+                   "evidence" => _,
+                   "goal_alignment" => _,
+                   "next_action" => _,
+                   "outcome" => _,
+                   "phase" => _,
+                   "summary" => _
+                 },
+                 "required" => [
+                   "checkpoint_key",
+                   "phase",
+                   "summary",
+                   "decision",
+                   "evidence",
+                   "next_action",
+                   "outcome"
+                 ],
+                 "type" => "object"
+               },
+               "name" => "symphony_loop_checkpoint"
              }
            ] = DynamicTool.tool_specs()
 
     assert description =~ "Linear"
+    assert loop_description =~ "SQLite"
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +57,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => ["linear_graphql", "symphony_loop_checkpoint"]
              }
            }
 
@@ -40,6 +67,43 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                "text" => response["output"]
              }
            ]
+  end
+
+  test "symphony_loop_checkpoint records structured issue feedback" do
+    issue = %Issue{id: "issue-loop", identifier: "QNT-LOOP"}
+    test_pid = self()
+    arguments = checkpoint_arguments()
+
+    response =
+      DynamicTool.execute("symphony_loop_checkpoint", arguments,
+        issue: issue,
+        turn_number: 3,
+        loop_recorder: fn recorded_issue, recorded_arguments, turn_number ->
+          send(test_pid, {:checkpoint_recorded, recorded_issue, recorded_arguments, turn_number})
+          {:ok, %{id: 7, outcome: "continue"}}
+        end
+      )
+
+    assert_received {:checkpoint_recorded, ^issue, ^arguments, 3}
+    assert response["success"] == true
+    assert Jason.decode!(response["output"]) == %{"id" => 7, "outcome" => "continue"}
+  end
+
+  test "symphony_loop_checkpoint returns actionable failures" do
+    missing_context = DynamicTool.execute("symphony_loop_checkpoint", checkpoint_arguments())
+    assert missing_context["success"] == false
+    assert Jason.decode!(missing_context["output"])["error"]["reason"] == ":missing_issue_context"
+
+    issue = %Issue{id: "issue-loop", identifier: "QNT-LOOP"}
+
+    rejected =
+      DynamicTool.execute("symphony_loop_checkpoint", checkpoint_arguments(),
+        issue: issue,
+        loop_recorder: fn _issue, _arguments, _turn -> {:error, :terminal_evidence_required} end
+      )
+
+    assert rejected["success"] == false
+    assert Jason.decode!(rejected["output"])["error"]["reason"] == ":terminal_evidence_required"
   end
 
   test "linear_graphql returns successful GraphQL responses as tool text" do
@@ -306,5 +370,18 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert response["success"] == true
     assert response["output"] == ":ok"
+  end
+
+  defp checkpoint_arguments do
+    %{
+      "checkpoint_key" => "verify-v1",
+      "phase" => "verify",
+      "goal_alignment" => "aligned",
+      "summary" => "Backtest completed",
+      "decision" => "Continue to robustness checks",
+      "evidence" => ["artifact:results.json"],
+      "next_action" => "Run cost sensitivity",
+      "outcome" => "continue"
+    }
   end
 end

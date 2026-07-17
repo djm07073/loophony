@@ -4,8 +4,8 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Codex.{AppServer, DynamicTool}
+  alias SymphonyElixir.{Config, Linear.Issue, LoopStore, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -100,45 +100,84 @@ defmodule SymphonyElixir.AgentRunner do
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
+    tool_executor =
+      Keyword.get(opts, :tool_executor, fn tool, arguments ->
+        DynamicTool.execute(tool, arguments, issue: issue, turn_number: turn_number)
+      end)
+
     with {:ok, turn_session} <-
            AppServer.run_turn(
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message: codex_message_handler(codex_update_recipient, issue),
+             tool_executor: tool_executor
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
-
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-          :ok
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
+      if LoopStore.review_gate_open?() do
+        Logger.info("Stopping at the scheduled human goal-review gate after a safe Codex turn for #{issue_context(issue)}")
+        :ok
+      else
+        continue_after_turn(
+          app_session,
+          workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number,
+          max_turns
+        )
       end
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp continue_after_turn(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns
+       ) do
+    case continue_with_issue?(issue, issue_state_fetcher) do
+      {:continue, refreshed_issue} when turn_number < max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+
+        do_run_codex_turns(
+          app_session,
+          workspace,
+          refreshed_issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number + 1,
+          max_turns
+        )
+
+      {:continue, refreshed_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
+        :ok
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp build_turn_prompt(issue, opts, 1, _max_turns) do
+    prompt = PromptBuilder.build_prompt(issue, opts)
+
+    prompt
+    |> append_context(LoopStore.review_context())
+    |> append_context(LoopStore.prompt_context(issue))
+  end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -148,9 +187,14 @@ defmodule SymphonyElixir.AgentRunner do
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
+    - Before further work, refresh Linear comments on the current issue and root goal, then consume each new `## Human Input` comment exactly once. Replan immediately when its kind is `goal_adjustment` or `unblock`.
+    - Use `symphony_loop_checkpoint` after receiving meaningful feedback or verification. Keep checkpoint keys stable when correcting the same cycle.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
   end
+
+  defp append_context(prompt, ""), do: prompt
+  defp append_context(prompt, context), do: prompt <> "\n\n" <> context
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.suhajin.symphony-quant</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>exec /Users/suhajin/dev/agents/symphony-quant/quant/run.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>QUANT_RESEARCH_REPO_URL</key>
+    <string>replace-with-research-repository-clone-url</string>
+    <key>SYMPHONY_QUANT_STATE_ROOT</key>
+    <string>/Users/suhajin/.local/share/symphony-quant</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/suhajin/.local/share/symphony-quant/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/suhajin/.local/share/symphony-quant/launchd.err.log</string>
+</dict>
+</plist>

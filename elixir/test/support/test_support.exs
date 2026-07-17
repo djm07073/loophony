@@ -102,9 +102,17 @@ defmodule SymphonyElixir.TestSupport do
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+          loop_database_path: nil,
+          loop_recent_limit: 12,
+          review_enabled: false,
+          review_timezone: "Asia/Seoul",
+          review_times: ["10:00", "22:00"],
+          review_issue_identifier: nil,
+          review_reviewer: nil,
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
           max_concurrent_agents: 10,
+          max_queued_issues: 5,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
@@ -140,9 +148,17 @@ defmodule SymphonyElixir.TestSupport do
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
+    loop_database_path = Keyword.get(config, :loop_database_path)
+    loop_recent_limit = Keyword.get(config, :loop_recent_limit)
+    review_enabled = Keyword.get(config, :review_enabled)
+    review_timezone = Keyword.get(config, :review_timezone)
+    review_times = Keyword.get(config, :review_times)
+    review_issue_identifier = Keyword.get(config, :review_issue_identifier)
+    review_reviewer = Keyword.get(config, :review_reviewer)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
+    max_queued_issues = Keyword.get(config, :max_queued_issues)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
@@ -181,9 +197,19 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
+        "loop:",
+        "  database_path: #{yaml_value(loop_database_path)}",
+        "  recent_limit: #{yaml_value(loop_recent_limit)}",
+        "review:",
+        "  enabled: #{yaml_value(review_enabled)}",
+        "  timezone: #{yaml_value(review_timezone)}",
+        "  times: #{yaml_value(review_times)}",
+        "  issue_identifier: #{yaml_value(review_issue_identifier)}",
+        "  reviewer: #{yaml_value(review_reviewer)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
+        "  max_queued_issues: #{yaml_value(max_queued_issues)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",

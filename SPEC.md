@@ -330,6 +330,8 @@ Top-level keys:
 - `tracker`
 - `polling`
 - `workspace`
+- `loop`
+- `review`
 - `hooks`
 - `agent`
 - `codex`
@@ -386,7 +388,39 @@ Fields:
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
 
-#### 5.3.4 `hooks` (object)
+#### 5.3.4 `loop` (object, OPTIONAL extension)
+
+Fields:
+
+- `database_path` (path string or `$VAR`)
+  - Default: `<workspace.root>/_loop/symphony-loop.sqlite3`
+  - Stores local, machine-readable checkpoints across fresh agent sessions.
+- `recent_limit` (positive integer)
+  - Default: `12`
+  - Maximum: `100`
+  - Controls the recent checkpoint window used by status and prompt context.
+
+#### 5.3.5 `review` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `false`
+- `timezone` (string), current supported value `Asia/Seoul`
+- `times` (unique list of `HH:MM` strings), default `["10:00", "22:00"]`
+- `issue_identifier` (string), REQUIRED when enabled
+- `reviewer` (Linear mention string), REQUIRED when enabled
+
+When enabled, the first orchestration poll at or after each scheduled window MUST create or reuse a
+durable open review gate, publish one marked report to the configured tracker issue, and stop new
+dispatch. An in-flight agent MAY finish its current command or turn but MUST stop at the next safe
+boundary. Work resumes only after an explicit `maintain` or `adjust` decision with non-empty human
+feedback is persisted to both the tracker report and durable local gate state. Silence MUST NOT be
+interpreted as approval.
+
+This gate is global orchestration state and MUST NOT merge checkpoint history between issue-scoped
+loops.
+
+#### 5.3.6 `hooks` (object)
 
 Fields:
 
@@ -410,13 +444,17 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+#### 5.3.7 `agent` (object)
 
 Fields:
 
 - `max_concurrent_agents` (integer)
   - Default: `10`
   - Changes SHOULD be re-applied at runtime and affect subsequent dispatch decisions.
+- `max_queued_issues` (positive integer)
+  - Default: `5`
+  - Bounds the sorted pending candidate window independently from running workers.
+  - Running, claimed, and blocked issues do not consume this limit.
 - `max_turns` (positive integer)
   - Default: `20`
   - Limits the number of coding-agent turns within one worker session.
@@ -429,7 +467,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.3.8 `codex` (object)
 
 Fields:
 
@@ -584,12 +622,20 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
+- `loop.database_path`: path resolved to absolute, default `<workspace.root>/_loop/symphony-loop.sqlite3`
+- `loop.recent_limit`: integer, default `12`, valid range `1..100`
+- `review.enabled`: boolean, default `false`
+- `review.timezone`: string, current supported value `Asia/Seoul`
+- `review.times`: unique `HH:MM` list, default `["10:00", "22:00"]`
+- `review.issue_identifier`: tracker issue identifier, required when review is enabled
+- `review.reviewer`: tracker mention, required when review is enabled
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
 - `agent.max_concurrent_agents`: integer, default `10`
+- `agent.max_queued_issues`: integer, default `5`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
@@ -714,8 +760,9 @@ Tick sequence:
 2. Run dispatch preflight validation.
 3. Fetch candidate issues from tracker using active states.
 4. Sort issues by dispatch priority.
-5. Dispatch eligible issues while slots remain.
-6. Notify observability/status consumers of state changes.
+5. Exclude running, claimed, and blocked issues, then retain at most `agent.max_queued_issues`.
+6. Dispatch queued issues while slots remain.
+7. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
@@ -730,6 +777,7 @@ An issue is dispatch-eligible only if all are true:
   label in `tracker.required_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
+- It is within the bounded pending queue after sorting.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
@@ -769,20 +817,24 @@ Backoff formula:
 
 Retry handling behavior:
 
-1. Fetch active candidate issues (not all issues).
-2. Find the specific issue by `issue_id`.
-3. If not found, release claim.
-4. If found and still candidate-eligible:
+1. Refresh the specific issue by `issue_id`, including terminal and non-active states.
+2. If not found, clean its workspace, release the claim, and trigger an immediate poll.
+3. If found and still candidate-eligible:
    - Dispatch if slots are available.
    - Otherwise requeue with error `no available orchestrator slots`.
-5. If found but no longer active, release claim.
+4. If found but terminal, clean its workspace, release the claim, and trigger an immediate poll.
+5. If found but otherwise no longer active, release the claim and trigger an immediate poll.
+
+After a continuation check observes that an issue became terminal or otherwise left the active
+states, the orchestrator SHOULD queue an immediate poll. This makes the next issue
+completion-driven while the regular polling interval remains a watchdog and idle heartbeat.
 
 Note:
 
-- Terminal-state workspace cleanup is handled by startup cleanup and active-run reconciliation
-  (including terminal transitions for currently running issues).
-- Retry handling mainly operates on active candidates and releases claims when the issue is absent,
-  rather than performing terminal cleanup itself.
+- Terminal-state workspace cleanup is handled by startup cleanup, active-run reconciliation, and
+  continuation checks after a worker exits.
+- Retry refreshes use direct issue lookup so terminal completion can clean the workspace and hand
+  control to the next queued issue without waiting for the idle heartbeat.
 
 ### 8.5 Active Run Reconciliation
 
@@ -1055,7 +1107,7 @@ Unsupported dynamic tool calls:
 Optional client-side tool extension:
 
 - An implementation MAY expose a limited set of client-side tools to the app-server session.
-- Current standardized optional tool: `linear_graphql`.
+- Current standardized optional tools: `linear_graphql` and `symphony_loop_checkpoint`.
 - If implemented, supported tools SHOULD be advertised to the app-server session during startup
   using the protocol mechanism supported by the targeted Codex app-server version.
 - Unsupported tool names SHOULD still return a failure result using the targeted protocol and
@@ -1092,6 +1144,27 @@ Optional client-side tool extension:
     for debugging
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
+
+`symphony_loop_checkpoint` extension contract:
+
+- Purpose: persist a compact feedback-loop checkpoint for the current issue in a local durable
+  store without requiring the agent to access database credentials or files directly.
+- Preferred fields: stable `checkpoint_key`, `phase`, optional `goal_alignment`, `summary`,
+  `decision`, evidence strings, `next_action`, and `outcome`.
+- Supported phases: `observe`, `orient`, `act`, `verify`, `learn`, and `handoff`.
+- Supported outcomes: `continue`, `done`, `rejected`, `blocked`, and `retry`.
+- One loop MUST correspond to exactly one Linear issue, with `issue_id` as its immutable identity.
+  A checkpoint MUST NOT be inherited by or injected into a different issue.
+- The pair `(issue_id, checkpoint_key)` MUST be idempotent so corrected retries replace the same
+  logical checkpoint.
+- `done` and `rejected` outcomes MUST include non-empty evidence.
+- The runtime SHOULD append only the current issue's recent checkpoints to the first prompt of a
+  fresh agent session. It MUST label them as historical data that must be reconciled with current
+  tracker and repository evidence.
+- Cross-issue context MUST be transferred explicitly through the next tracker issue's description,
+  relations, evidence links, and acceptance checks rather than through implicit local-memory reads.
+- A status extension SHOULD expose availability, checkpoint count, outcome totals, and recent
+  checkpoints without making the local store the human-facing source of truth.
   in-session.
 
 User-input-required policy:
@@ -1231,6 +1304,8 @@ Inputs to prompt rendering:
 - `workflow.prompt_template`
 - normalized `issue` object
 - OPTIONAL `attempt` integer (retry/continuation metadata)
+- OPTIONAL recent durable loop checkpoints, when the loop-memory extension is enabled
+- OPTIONAL latest resolved scheduled human goal-review decision
 
 ### 12.2 Rendering Rules
 
@@ -1445,7 +1520,12 @@ Minimum endpoints:
         "total_tokens": 7400,
         "seconds_running": 1834.2
       },
-      "rate_limits": null
+      "rate_limits": null,
+      "review_gate": {
+        "window_key": "2026-07-18T10:00:00+09:00",
+        "status": "open",
+        "reported_at": "2026-07-18T01:00:10Z"
+      }
     }
     ```
 
@@ -1502,8 +1582,17 @@ Minimum endpoints:
     }
     ```
 
-  - If the issue is unknown to the current in-memory state, return `404` with an error response (for
-    example `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
+- `POST /api/v1/operator-input` (extension)
+  - Accepts an operator `instruction`, `goal_adjustment`, or `unblock` for a managed issue.
+  - Requires the `x-symphony-control: codex-app` header and SHOULD be exposed only on loopback.
+  - Persists the input as a marked tracker comment before requesting an immediate poll/reconcile.
+  - Delivers input at the next safe agent continuation checkpoint rather than interrupting an
+    in-flight command.
+  - `unblock` MAY move the target issue to an explicitly supplied active state (default `Ready`).
+
+  - If the issue identifier cannot be resolved by the current runtime snapshot or tracker, return
+    `404` with an error response (for example
+    `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
 
 - `POST /api/v1/refresh`
   - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations
@@ -1519,6 +1608,14 @@ Minimum endpoints:
       "operations": ["poll", "reconcile"]
     }
     ```
+
+- `POST /api/v1/review-decision` (extension)
+  - Requires the `x-symphony-control: codex-app` header and loopback exposure.
+  - Accepts `decision` as `maintain` or `adjust` plus mandatory non-empty `feedback`.
+  - Rejects the request when no scheduled review gate is open.
+  - Persists a marked decision comment to the configured review issue before resolving the local
+    gate and resuming dispatch.
+  - The latest resolved decision SHOULD be injected into later agent sessions as operator guidance.
 
 API design notes:
 
@@ -2039,6 +2136,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
+- If the `symphony_loop_checkpoint` client-side tool extension is implemented:
+  - the tool is advertised to the session
+  - stable keys upsert checkpoints for the current issue
+  - terminal outcomes without evidence return structured failure
+  - recent issue checkpoints are injected into the first prompt of a fresh session
 
 ### 17.6 Observability
 
@@ -2088,6 +2190,7 @@ Use the same validation profiles as Section 17:
 - Typed config layer with defaults and `$` resolution
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
+- Bounded pending dispatch queue (`agent.max_queued_issues`, default 5)
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
@@ -2108,6 +2211,12 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
+- `symphony_loop_checkpoint` client-side tool extension persists idempotent local feedback,
+  verification, learning, and handoff records and exposes them only to later sessions of the same
+  Linear issue.
+- Scheduled goal-review extension durably opens at configured windows, reports to the configured
+  tracker issue, exposes `review_gate` in status, fails closed when gate state is unavailable, and
+  resumes only after explicit `maintain` or `adjust` feedback.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

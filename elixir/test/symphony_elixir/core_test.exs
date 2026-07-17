@@ -16,7 +16,13 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
+    assert config.agent.max_queued_issues == 5
     assert config.agent.max_turns == 20
+    assert config.loop.recent_limit == 12
+    assert config.loop.database_path == Path.join(config.workspace.root, "_loop/symphony-loop.sqlite3")
+    assert config.review.enabled == false
+    assert config.review.timezone == "Asia/Seoul"
+    assert config.review.times == ["10:00", "22:00"]
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -36,6 +42,41 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_queued_issues: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_queued_issues"
+
+    write_workflow_file!(Workflow.workflow_file_path(), loop_recent_limit: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "loop.recent_limit"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      review_enabled: true,
+      review_issue_identifier: nil,
+      review_reviewer: nil
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "review.issue_identifier"
+    assert message =~ "review.reviewer"
+
+    write_workflow_file!(Workflow.workflow_file_path(), review_times: ["10:00", "10:00"])
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "review.times"
+
+    write_workflow_file!(Workflow.workflow_file_path(), review_times: ["bad"])
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "review.times"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      review_enabled: true,
+      review_times: ["10:00", "22:00"],
+      review_issue_identifier: "QNT-REVIEW",
+      review_reviewer: "@owner"
+    )
+
+    assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -147,6 +188,19 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.settings!().tracker.assignee == env_assignee
+  end
+
+  test "loop database path resolves from its environment variable" do
+    env_name = "SYMPHONY_TEST_LOOP_DB_PATH"
+    previous_path = System.get_env(env_name)
+    database_path = Path.join(System.tmp_dir!(), "symphony-test-loop.sqlite3")
+
+    on_exit(fn -> restore_env(env_name, previous_path) end)
+    System.put_env(env_name, database_path)
+
+    write_workflow_file!(Workflow.workflow_file_path(), loop_database_path: "$#{env_name}")
+
+    assert Config.settings!().loop.database_path == database_path
   end
 
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
@@ -620,6 +674,35 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(updated_state.retry_attempts, issue_id)
   end
 
+  test "terminal completion schedules an immediate poll for the next issue" do
+    issue_id = "completed-issue"
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 1_200_000,
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-566",
+      title: "Completed work",
+      state: "Done"
+    }
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue_id, 1, %{
+        identifier: issue.identifier
+      })
+
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    assert is_reference(updated_state.tick_timer_ref)
+    assert is_reference(updated_state.tick_token)
+    assert updated_state.next_poll_due_at_ms <= System.monotonic_time(:millisecond) + 50
+
+    Process.cancel_timer(updated_state.tick_timer_ref)
+  end
+
   test "agent runner does not continue after a required label is removed" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
 
@@ -667,6 +750,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -675,7 +759,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_at_offset(due_at_ms, sent_at_ms, 1_000, 2_000)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -708,6 +792,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -715,7 +800,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_at_offset(due_at_ms, sent_at_ms, 40_000, 42_000)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -747,6 +832,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -754,7 +840,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_at_offset(due_at_ms, sent_at_ms, 10_000, 12_000)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -874,11 +960,11 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  defp assert_due_at_offset(due_at_ms, sent_at_ms, min_offset_ms, max_offset_ms) do
+    offset_ms = due_at_ms - sent_at_ms
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    assert offset_ms >= min_offset_ms
+    assert offset_ms <= max_offset_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -1458,6 +1544,22 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
+      assert {:ok, _checkpoint} =
+               SymphonyElixir.LoopStore.record_checkpoint(
+                 issue,
+                 %{
+                   "checkpoint_key" => "prior-verification",
+                   "phase" => "verify",
+                   "goal_alignment" => "aligned",
+                   "summary" => "The first sample passed the sanity checks",
+                   "decision" => "Retain the hypothesis and broaden the sample",
+                   "evidence" => ["backtest artifact: sample-001"],
+                   "next_action" => "Run the expanded sample",
+                   "outcome" => "continue"
+                 },
+                 1
+               )
+
       assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
@@ -1480,6 +1582,8 @@ defmodule SymphonyElixir.CoreTest do
 
       assert length(turn_texts) == 2
       assert Enum.at(turn_texts, 0) =~ "You are an agent for this repository."
+      assert Enum.at(turn_texts, 0) =~ "Durable loop memory"
+      assert Enum.at(turn_texts, 0) =~ "Retain the hypothesis and broaden the sample"
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"

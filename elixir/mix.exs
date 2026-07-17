@@ -25,6 +25,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
+          SymphonyElixir.LoopStore,
           SymphonyElixir.Workspace,
           SymphonyElixirWeb.DashboardLive,
           SymphonyElixirWeb.Endpoint,
@@ -69,11 +70,12 @@ defmodule SymphonyElixir.MixProject do
       {:phoenix, "~> 1.8.0"},
       {:phoenix_html, "~> 4.2"},
       {:phoenix_live_view, "~> 1.1.0"},
-      {:req, "~> 0.5"},
+      {:req, "~> 0.6"},
       {:jason, "~> 1.4"},
       {:yaml_elixir, "~> 2.12"},
       {:solid, "~> 1.2"},
       {:ecto, "~> 3.13"},
+      {:exqlite, "~> 0.39"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]

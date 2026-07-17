@@ -37,6 +37,16 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @issue_lookup_query """
+  query SymphonyResolveIssue($issueIdentifier: String!) {
+    issue(id: $issueIdentifier) {
+      id
+      identifier
+      url
+    }
+  }
+  """
+
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
@@ -45,6 +55,18 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
+
+  @spec resolve_issue(String.t()) :: {:ok, map()} | {:error, term()}
+  def resolve_issue(issue_identifier) when is_binary(issue_identifier) do
+    with {:ok, response} <-
+           client_module().graphql(@issue_lookup_query, %{issueIdentifier: issue_identifier}),
+         %{"id" => id, "identifier" => identifier} = issue <- get_in(response, ["data", "issue"]) do
+      {:ok, %{id: id, identifier: identifier, url: issue["url"]}}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :issue_not_found}
+    end
+  end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do

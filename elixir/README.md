@@ -20,8 +20,10 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 4. Sends a workflow prompt to Codex
 5. Keeps Codex working on the issue until the work is done
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+During app-server sessions, Symphony also serves client-side `linear_graphql` and
+`symphony_loop_checkpoint` tools. The former supports raw Linear GraphQL calls; the latter records
+structured observations, decisions, verification evidence, and next actions in local SQLite so a
+fresh Codex session can resume the feedback loop without depending on chat history.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -97,11 +99,21 @@ tracker:
   project_slug: "..."
 workspace:
   root: ~/code/workspaces
+loop:
+  database_path: ~/code/workspaces/_loop/symphony-loop.sqlite3
+  recent_limit: 12
+review:
+  enabled: true
+  timezone: Asia/Seoul
+  times: ["10:00", "22:00"]
+  issue_identifier: QNT-REVIEW
+  reviewer: "@owner"
 hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
 agent:
   max_concurrent_agents: 10
+  max_queued_issues: 5
   max_turns: 20
 codex:
   command: codex app-server
@@ -132,6 +144,22 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `agent.max_queued_issues` bounds the sorted pending candidate window. Running, claimed, and
+  blocked issues are tracked separately. Default: `5`.
+- `loop.database_path` selects the local SQLite checkpoint ledger. It defaults to
+  `<workspace.root>/_loop/symphony-loop.sqlite3` and may use `$VAR`.
+- `loop.recent_limit` controls how many recent checkpoints appear in status and fresh-session
+  context. Default: `12`; valid range: `1..100`.
+- Stable checkpoint keys are idempotent per issue. Terminal `done` and `rejected` checkpoints
+  require non-empty evidence.
+- `review.enabled` activates a durable, global human-feedback gate. This implementation supports
+  `Asia/Seoul`; `review.times` defaults to `10:00` and `22:00`.
+- Enabled review requires a persistent `review.issue_identifier` and Linear `review.reviewer`.
+  The first poll after each window posts a report, pauses new dispatch, and waits for explicit
+  `maintain` or `adjust` feedback.
+- When a completed worker has moved its issue out of the active states, Symphony immediately polls
+  for the next issue. `polling.interval_ms` therefore acts as an idle heartbeat and watchdog rather
+  than adding a fixed delay between completed issues.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
@@ -149,6 +177,8 @@ tracker:
   api_key: $LINEAR_API_KEY
 workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
+loop:
+  database_path: $SYMPHONY_LOOP_DB_PATH
 hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
@@ -160,7 +190,8 @@ codex:
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, `/api/v1/refresh`,
+  `/api/v1/operator-input`, and `/api/v1/review-decision`.
 
 ## Web dashboard
 

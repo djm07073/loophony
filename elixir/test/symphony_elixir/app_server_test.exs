@@ -498,9 +498,15 @@ defmodule SymphonyElixir.AppServerTest do
                          "description" => description,
                          "inputSchema" => %{"required" => ["query"]},
                          "name" => "linear_graphql"
+                       },
+                       %{
+                         "description" => loop_description,
+                         "inputSchema" => %{"required" => required},
+                         "name" => "symphony_loop_checkpoint"
                        }
                      ] ->
-                       description =~ "Linear"
+                       description =~ "Linear" and loop_description =~ "SQLite" and
+                         "checkpoint_key" in required
 
                      _ ->
                        false

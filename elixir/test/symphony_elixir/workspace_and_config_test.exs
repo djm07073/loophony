@@ -508,6 +508,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
   end
 
+  test "orchestrator bounds the pending dispatch queue and excludes claimed work" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_queued_issues: 5)
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(["issue-2"]),
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    issues =
+      Enum.map(1..7, fn index ->
+        %Issue{
+          id: "issue-#{index}",
+          identifier: "MT-#{index}",
+          title: "Queued work #{index}",
+          state: "Todo",
+          priority: 2,
+          created_at: DateTime.add(~U[2026-01-01 00:00:00Z], index, :second)
+        }
+      end)
+
+    queued = Orchestrator.queued_issues_for_dispatch_for_test(issues, state)
+
+    assert Enum.map(queued, & &1.identifier) == ["MT-1", "MT-3", "MT-4", "MT-5", "MT-6"]
+  end
+
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -800,6 +828,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
+    assert config.agent.max_queued_issues == 5
     assert config.codex.command == "codex app-server"
 
     assert config.codex.approval_policy == %{

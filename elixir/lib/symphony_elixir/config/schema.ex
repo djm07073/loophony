@@ -125,6 +125,63 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Loop do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:database_path, :string)
+      field(:recent_limit, :integer, default: 12)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:database_path, :recent_limit], empty_values: [])
+      |> validate_number(:recent_limit, greater_than: 0, less_than_or_equal_to: 100)
+    end
+  end
+
+  defmodule Review do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:timezone, :string, default: "Asia/Seoul")
+      field(:times, {:array, :string}, default: ["10:00", "22:00"])
+      field(:issue_identifier, :string)
+      field(:reviewer, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :timezone, :times, :issue_identifier, :reviewer], empty_values: [])
+      |> validate_inclusion(:timezone, ["Asia/Seoul"])
+      |> validate_change(:times, fn :times, times ->
+        valid? =
+          is_list(times) and times != [] and Enum.uniq(times) == times and
+            Enum.all?(times, &Regex.match?(~r/\A(?:[01]\d|2[0-3]):[0-5]\d\z/, &1))
+
+        if valid?, do: [], else: [times: "must contain unique HH:MM values"]
+      end)
+      |> require_enabled_fields()
+    end
+
+    defp require_enabled_fields(changeset) do
+      if get_field(changeset, :enabled) do
+        validate_required(changeset, [:issue_identifier, :reviewer])
+      else
+        changeset
+      end
+    end
+  end
+
   defmodule Agent do
     @moduledoc false
     use Ecto.Schema
@@ -135,6 +192,7 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
+      field(:max_queued_issues, :integer, default: 5)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
@@ -145,10 +203,17 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_queued_issues,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
+      |> validate_number(:max_queued_issues, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
@@ -199,6 +264,9 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_required([:command])
+      |> validate_change(:command, fn :command, value ->
+        if value == "", do: [command: "can't be blank"], else: []
+      end)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
@@ -272,6 +340,8 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:loop, Loop, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:review, Review, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
@@ -364,6 +434,8 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
+    |> cast_embed(:loop, with: &Loop.changeset/2)
+    |> cast_embed(:review, with: &Review.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
@@ -383,13 +455,23 @@ defmodule SymphonyElixir.Config.Schema do
       | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
+    loop = %{
+      settings.loop
+      | database_path:
+          resolve_path_value(
+            settings.loop.database_path,
+            Path.join(workspace.root, "_loop/symphony-loop.sqlite3")
+          )
+          |> Path.expand()
+    }
+
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    %{settings | tracker: tracker, workspace: workspace, loop: loop, codex: codex}
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -427,6 +509,8 @@ defmodule SymphonyElixir.Config.Schema do
       resolved -> resolved
     end
   end
+
+  defp resolve_path_value(nil, default), do: default
 
   defp resolve_path_value(value, default) when is_binary(value) do
     case normalize_path_token(value) do
