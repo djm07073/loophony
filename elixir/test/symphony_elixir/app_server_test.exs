@@ -1,6 +1,38 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  test "app server JSON encoding preserves valid Korean text" do
+    message = %{
+      "method" => "turn/start",
+      "params" => %{
+        "title" => "HFT-95: 결정론적 canonical staging 계약",
+        "input" => [%{"type" => "text", "text" => "한국어 설명을 그대로 보존한다."}]
+      }
+    }
+
+    encoded = AppServer.encode_message_for_test(message)
+
+    assert String.valid?(encoded)
+    assert Jason.decode!(encoded) == message
+  end
+
+  test "app server JSON encoding repairs invalid UTF-8 recursively" do
+    message = %{
+      "method" => "turn/start",
+      "params" => %{
+        "title" => <<"HFT-95: ", 0xEB>>,
+        "input" => [%{"type" => "text", "text" => <<"prefix ", 0xFF, " suffix">>}]
+      }
+    }
+
+    encoded = AppServer.encode_message_for_test(message)
+    decoded = Jason.decode!(encoded)
+
+    assert String.valid?(encoded)
+    assert get_in(decoded, ["params", "title"]) == "HFT-95: �"
+    assert get_in(decoded, ["params", "input", Access.at(0), "text"]) == "prefix � suffix"
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(

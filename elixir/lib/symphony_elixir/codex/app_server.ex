@@ -36,6 +36,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  @doc false
+  @spec encode_message_for_test(term()) :: binary()
+  def encode_message_for_test(message), do: encode_message(message)
+
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
@@ -1055,9 +1059,27 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp tool_call_arguments(_params), do: %{}
 
   defp send_message(port, message) do
-    line = Jason.encode!(message) <> "\n"
+    line = encode_message(message)
     Port.command(port, line)
   end
+
+  defp encode_message(message) do
+    message
+    |> sanitize_json_strings()
+    |> Jason.encode!()
+    |> Kernel.<>("\n")
+  end
+
+  defp sanitize_json_strings(value) when is_binary(value), do: String.replace_invalid(value, "�")
+  defp sanitize_json_strings(value) when is_list(value), do: Enum.map(value, &sanitize_json_strings/1)
+
+  defp sanitize_json_strings(value) when is_map(value) do
+    Map.new(value, fn {key, item} ->
+      {sanitize_json_strings(key), sanitize_json_strings(item)}
+    end)
+  end
+
+  defp sanitize_json_strings(value), do: value
 
   defp needs_input?("mcpServer/elicitation/request", payload) when is_map(payload), do: true
 
