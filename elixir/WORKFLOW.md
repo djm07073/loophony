@@ -56,6 +56,13 @@ Current status: {{ issue.state }}
 Labels: {{ issue.labels }}
 URL: {{ issue.url }}
 
+Canonical Linear project objective:
+{% if issue.project_description %}
+{{ issue.project_description }}
+{% else %}
+No project description was provided. Stop and mark the issue Blocked because the objective contract is missing.
+{% endif %}
+
 Description:
 {% if issue.description %}
 {{ issue.description }}

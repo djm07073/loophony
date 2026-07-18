@@ -325,6 +325,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "identifier" => "MT-1",
       "title" => "Blocked todo",
       "description" => "Needs dependency",
+      "project" => %{"description" => "Canonical project objective"},
       "priority" => 2,
       "state" => %{"name" => "Todo"},
       "branchName" => "mt-1",
@@ -363,6 +364,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
+    assert issue.project_description == "Canonical project objective"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
   end
