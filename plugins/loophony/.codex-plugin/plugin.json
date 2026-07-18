@@ -1,6 +1,6 @@
 {
   "name": "loophony",
-  "version": "0.1.0+codex.20260718055834",
+  "version": "0.1.0+codex.20260718073131",
   "description": "Codex App control plane and setup workflows for a local Loophony daemon.",
   "author": {
     "name": "djm07073",
