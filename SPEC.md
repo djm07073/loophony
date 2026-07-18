@@ -1584,7 +1584,7 @@ Minimum endpoints:
 
 - `POST /api/v1/operator-input` (extension)
   - Accepts an operator `instruction`, `goal_adjustment`, or `unblock` for a managed issue.
-  - Requires the `x-symphony-control: codex-app` header and SHOULD be exposed only on loopback.
+  - Requires the `x-loophony-control: codex-app` header and SHOULD be exposed only on loopback.
   - Persists the input as a marked tracker comment before requesting an immediate poll/reconcile.
   - Delivers input at the next safe agent continuation checkpoint rather than interrupting an
     in-flight command.
@@ -1610,7 +1610,7 @@ Minimum endpoints:
     ```
 
 - `POST /api/v1/review-decision` (extension)
-  - Requires the `x-symphony-control: codex-app` header and loopback exposure.
+  - Requires the `x-loophony-control: codex-app` header and loopback exposure.
   - Accepts `decision` as `maintain` or `adjust` plus mandatory non-empty `feedback`.
   - Rejects the request when no scheduled review gate is open.
   - Persists a marked decision comment to the configured review issue before resolving the local

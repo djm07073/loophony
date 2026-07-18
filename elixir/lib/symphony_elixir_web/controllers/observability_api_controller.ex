@@ -92,7 +92,7 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   end
 
   defp authorized_operator_request?(conn) do
-    Conn.get_req_header(conn, "x-symphony-control") == ["codex-app"]
+    Conn.get_req_header(conn, "x-loophony-control") == ["codex-app"]
   end
 
   defp operator_input_error(conn, :issue_not_found),

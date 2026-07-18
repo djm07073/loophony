@@ -567,7 +567,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     accepted =
       build_conn()
-      |> Plug.Conn.put_req_header("x-symphony-control", "codex-app")
+      |> Plug.Conn.put_req_header("x-loophony-control", "codex-app")
       |> post("/api/v1/operator-input", %{
         "kind" => "goal_adjustment",
         "message" => "Narrow the universe to liquid US equities.",
@@ -593,7 +593,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     resumed =
       build_conn()
-      |> Plug.Conn.put_req_header("x-symphony-control", "codex-app")
+      |> Plug.Conn.put_req_header("x-loophony-control", "codex-app")
       |> post("/api/v1/operator-input", %{
         "kind" => "unblock",
         "message" => "The missing decision is approved.",
@@ -651,7 +651,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     accepted =
       build_conn()
-      |> Plug.Conn.put_req_header("x-symphony-control", "codex-app")
+      |> Plug.Conn.put_req_header("x-loophony-control", "codex-app")
       |> post("/api/v1/review-decision", %{
         "decision" => "adjust",
         "feedback" => "Raise the liquidity floor."

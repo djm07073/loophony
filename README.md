@@ -16,7 +16,8 @@ _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), S
 
 This fork includes a single-worker, Linear-driven 24/7 quant research profile under
 [`quant/`](quant/README.md). It keeps the official Elixir orchestrator as the control plane and
-uses the installed Quant Agent plugin only for research and market-data capabilities. A local
+uses the installed Loophony plugin as its Codex App control plane and the Quant Agent plugin only
+for optional research and market-data capabilities. A local
 SQLite checkpoint ledger carries observations, decisions, evidence, and next actions across fresh
 Codex sessions while Linear remains the human-facing record. Durable 10:00 and 22:00 KST review
 gates pause orchestration until the user explicitly maintains or adjusts the goal with feedback.

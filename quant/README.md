@@ -20,9 +20,9 @@ quant-research worker. The former TypeScript goal loop is not part of this execu
   in local SQLite. One loop is exactly one Linear child issue, identified by its immutable
   `issue_id`.
 
-The globally installed Quant Agent plugin supplies research and Alpaca market-data capabilities.
-Symphony owns Linear scheduling and workers must not call the plugin's legacy `quant_goal_*` or
-`quant_task_*` controller tools.
+The globally installed Loophony plugin supplies the Codex App operator console. The separate Quant
+Agent plugin supplies only research and read-only Alpaca market-data capabilities. Symphony owns
+Linear scheduling; workers must not call `loophony_*` control tools from inside an issue turn.
 
 The workflow calls the Codex App's bundled CLI directly because it supports `app-server` and shares
 the App's installed plugins and authentication. The older Homebrew `codex` binary is not used.
@@ -70,14 +70,14 @@ export QUANT_RESEARCH_REPO_URL='git@github.com:your-org/quant-research.git'
 ```
 
 The dashboard is available only on `127.0.0.1:8787`; Linear remains the primary dashboard.
-The installed Quant Agent plugin also uses this loopback endpoint as the Codex App operator console:
+The installed Loophony plugin uses this loopback endpoint as the Codex App operator console:
 it can read the current report, request an immediate refresh, and persist instructions, goal
 adjustments, or unblock decisions as Linear comments. A running turn consumes input at its next
 safe continuation checkpoint; it is not interrupted mid-command. `unblock` additionally returns the
 target issue to `Ready`.
 
-At the 10:00 and 22:00 KST review windows, `symphony_status` reports an open `review_gate` and the
-daemon stops dispatching new issues. Use `symphony_submit_review_decision` with `maintain` or
+At the 10:00 and 22:00 KST review windows, `loophony_status` reports an open `review_gate` and the
+daemon stops dispatching new issues. Use `loophony_submit_review_decision` with `maintain` or
 `adjust` plus non-empty feedback. The decision is written to the review issue and SQLite before
 dispatch resumes. Silence never counts as approval.
 

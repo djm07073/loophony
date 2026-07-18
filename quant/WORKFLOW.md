@@ -90,8 +90,8 @@ No description was provided.
 - Linear is the durable control plane and the human-facing history.
 - The installed Quant Agent plugin is a domain layer only. Use its `quant-research`,
   `alpaca-market-data`, and market-data tools when relevant.
-- Never call `quant_goal_*`, `quant_task_*`, `quant_goal_heartbeat`, or `quant_goal_report`.
-  Those belong to the retired TypeScript controller and would create a second scheduler.
+- The installed Loophony plugin is the Codex App operator plane. Never call its `loophony_*` tools
+  from this worker turn; doing so would feed the orchestrator back into itself.
 - Never place a live order. Research and read-only/paper-data access are allowed. A paper-trading
   change requires a separately scoped issue; live trading always requires explicit human approval.
 - Never copy credentials, tokens, account identifiers, or secret-bearing command output into
