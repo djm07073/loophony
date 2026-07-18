@@ -40,17 +40,20 @@ Do not paste a Linear API token, brokerage secret, or other credential into Code
 Open a new task in Codex App and paste this prompt:
 
 ```text
-이 Mac에 공개 저장소 https://github.com/djm07073/loophony 의 Loophony를 설치해줘.
+Install Loophony on this Mac from the public repository
+https://github.com/djm07073/loophony.
 
-1. 저장소의 skills/loophony-setup 스킬을 내 Codex 사용자 스킬 디렉터리에 설치해.
-2. 설치한 SKILL.md를 직접 읽고 같은 작업에서 그 절차를 계속 수행해.
-3. 저장소를 ~/dev/agents/loophony에 안전하게 클론하거나 기존의 깨끗한 클론을 재사용해.
-4. 사전 점검을 실행하고 Loophony, Linear, Alpaca 플러그인을 설치해.
-5. Linear와 Alpaca OAuth가 필요하면 내가 Codex App에서 연결할 수 있도록 정확한 시점에 멈춰서 알려줘.
-6. Elixir 데몬을 빌드하고 상태를 검증하되, 아직 서비스는 시작하지 마.
-7. 토큰이나 비밀값을 채팅으로 요청하거나 출력하지 마.
+1. Install the repository's skills/loophony-setup skill in my Codex user skills directory.
+2. Read the installed SKILL.md and continue following it in this task.
+3. Safely clone the repository to ~/dev/agents/loophony, or reuse a clean matching clone.
+4. Run preflight checks and install the Loophony, Linear, and Alpaca plugins.
+5. If Linear or Alpaca OAuth is required, stop at the correct point and tell me how to connect it
+   in Codex App.
+6. Build and verify the Elixir daemon, but do not start the service yet.
+7. Never request or print tokens or secrets in chat.
 
-새 플러그인을 사용하려면 새 Codex 작업이 필요할 경우, 다음에 붙여넣을 목표 생성 프롬프트까지 알려줘.
+If a new Codex task is required to load the new plugins, give me the exact goal-creation prompt to
+paste into that task.
 ```
 
 Connect Linear in Codex App when prompted. Alpaca is optional unless the project needs its
@@ -63,21 +66,21 @@ In the new task, replace the placeholders and paste:
 ```text
 $loophony-create-goal
 
-다음 Linear 프로젝트에 Loophony 대목표를 만들어줘.
+Create the durable Loophony goal for this Linear project.
 
-- 프로젝트: <LINEAR_PROJECT_URL_OR_EXACT_NAME>
-- 내가 원하는 변화: <BROAD_OBJECTIVE>
-- 중요하게 생각하는 제약: <CONSTRAINTS_OR_UNKNOWN>
+- Project: <LINEAR_PROJECT_URL_OR_EXACT_NAME>
+- Desired change: <BROAD_OBJECTIVE>
+- Important constraints: <CONSTRAINTS_OR_UNKNOWN>
 
-프로젝트와 기존 이슈를 먼저 읽고, 확인할 수 있는 사실은 직접 조사해.
-목표·범위·트레이드오프처럼 내가 결정해야 하는 내용만 한 번에 하나씩 질문해.
-실행량이 아니라 관찰 가능한 결과, 성공 기준, 증거 출처, 비목표, 권한 경계,
-달성·기각·재조정 조건으로 목표 계약을 작성해.
+Read the project and existing issues first. Research facts that you can verify independently.
+Ask one question at a time only for decisions I must make, such as goals, scope, and tradeoffs.
+Define the goal contract using observable outcomes, success criteria, evidence sources, non-goals,
+authority boundaries, and conditions for achievement, rejection, or reframing—not activity volume.
 
-쓰기 전에 초안과 품질 게이트 결과를 보여주고 내 승인을 받아.
-승인 후 프로젝트 설명의 Loophony Goal 블록, [Goal] 루트 이슈,
-[Agent Goal Review] 이슈를 중복 없이 생성하거나 갱신해.
-아직 실행용 Candidate 이슈는 만들지 마.
+Before writing, show me the draft and quality-gate result and obtain my approval.
+After approval, create or update the project description's Loophony Goal block, the [Goal] root
+issue, and the [Agent Goal Review] issue without creating duplicates.
+Do not create an executable Candidate issue yet.
 ```
 
 The skill returns the project slug, root goal issue, and persistent review issue identifier. Keep
@@ -89,21 +92,21 @@ Goal provisioning deliberately does not invent an execution backlog. After appro
 paste this follow-up in the same task to create only the first bounded issue:
 
 ```text
-방금 확정한 Loophony 대목표에서 지금 가장 높은 레버리지를 가진 첫 번째 실행 이슈를 만들어줘.
+Create the highest-leverage first executable issue for the Loophony goal we just approved.
 
-Linear 프로젝트와 [Goal] 루트 이슈를 다시 읽고 아직 충족되지 않은 성공 기준 하나를 선택해.
-정확히 하나의 child issue만 만들고 다음 조건을 지켜:
+Re-read the Linear project and [Goal] root issue, then select one unmet success criterion.
+Create exactly one child issue with these requirements:
 
-- 상태: Candidate
-- 라벨: symphony-quant
-- 하나 이상의 SC-* 성공 기준에 명시적으로 매핑
-- 하나의 Codex 세션에서 독립적으로 검증 가능한 범위
-- 실행 전에 확인 가능한 acceptance checks와 필요한 evidence 기재
-- 프로젝트 제약, 비목표, 권한 경계를 그대로 상속
-- 이미 완료됐거나 기각된 작업과 중복 금지
+- State: Candidate
+- Label: symphony-quant
+- Explicitly map it to at least one SC-* success criterion
+- Keep it independently verifiable within one Codex session
+- Include acceptance checks and required evidence before execution
+- Inherit the project's constraints, non-goals, and authority boundaries
+- Do not duplicate completed or rejected work
 
-목표가 이미 완전히 증명됐거나 안전하게 실행할 다음 단계가 없으면 이슈를 만들지 말고 이유를 알려줘.
-생성 후 이슈 identifier, URL, 매핑된 성공 기준을 보여줘.
+If the goal is already fully proven or no safe next increment exists, do not create an issue;
+explain why. After creation, show the issue identifier, URL, and mapped success criterion.
 ```
 
 This is the only issue that normally needs manual seeding. Before a worker finishes, it creates or
@@ -117,18 +120,19 @@ Open a new task, replace the placeholders with the values returned above, and pa
 ```text
 $loophony-setup
 
-Loophony 설치를 이어서 구성하고 24/7 서비스를 시작해줘.
+Continue configuring Loophony and start it as a 24/7 service.
 
-- Linear 프로젝트 slug: <PROJECT_SLUG>
-- 목표 검토 이슈: <TEAM-123>
-- 리뷰어: <@HANDLE>
-- 작업 저장소 clone URL: <GIT_CLONE_URL>
+- Linear project slug: <PROJECT_SLUG>
+- Goal-review issue: <TEAM-123>
+- Reviewer: <@HANDLE>
+- Work repository clone URL: <GIT_CLONE_URL>
 
-설정을 렌더링하고 빌드와 health check를 실행해.
-Linear API 토큰이 필요하면 토큰을 받지 말고 내가 로컬 터미널에서 Keychain에 직접
-입력할 수 있는 명령만 알려줘. 기존 Candidate/Ready 이슈가 즉시 실행될 수 있음을 먼저 알려주고,
-내가 시작하라고 확인하면 launchd 서비스를 설치해. 마지막에는 데몬 상태와 다음 heartbeat,
-현재 실행·대기·Blocked·review gate 상태를 보여줘.
+Render the configuration, build the daemon, and run its health check.
+If a Linear API token is required, never accept it in chat. Give me only the command that lets me
+enter it directly into Keychain from my local terminal. Warn me that existing Candidate or Ready
+issues may run immediately. After I confirm that you should start, install the launchd service.
+Finally, show the daemon status, next heartbeat, and current running, queued, Blocked, and review
+gate states.
 ```
 
 After health succeeds, use `$loophony-control` in Codex App to inspect or steer the daemon.
