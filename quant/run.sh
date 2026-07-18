@@ -50,7 +50,7 @@ if [ ! -x ./bin/symphony ]; then
   mise exec -- mix build
 fi
 
-exec mise exec -- ./bin/symphony \
+exec mise exec -- mix run --no-start -e 'SymphonyElixir.CLI.main(System.argv())' -- \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails \
   --logs-root "$state_root/logs" \
   "$workflow_path"
