@@ -1,0 +1,11 @@
+interface:
+  display_name: "Loophony Create Goal"
+  short_description: "Create a durable Linear project goal for Loophony"
+  default_prompt: "Use $loophony-create-goal to create the main loop goal in my Linear project."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "linear"
+      description: "Linear MCP server for project and issue provisioning"
+      transport: "streamable_http"
+      url: "https://mcp.linear.app/mcp"

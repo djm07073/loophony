@@ -1,0 +1,38 @@
+{
+  "name": "loophony",
+  "version": "0.1.0+codex.20260718055834",
+  "description": "Codex App control plane and setup workflows for a local Loophony daemon.",
+  "author": {
+    "name": "djm07073",
+    "url": "https://github.com/djm07073"
+  },
+  "homepage": "https://github.com/djm07073/loophony",
+  "repository": "https://github.com/djm07073/loophony",
+  "license": "Apache-2.0",
+  "keywords": [
+    "agent",
+    "linear",
+    "orchestration",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Loophony",
+    "shortDescription": "Set up, monitor, and steer a local Loophony daemon.",
+    "longDescription": "Use Codex App as the operator console for Loophony, create durable Linear project goals, inspect daemon state, submit operator input, and resolve scheduled human review gates.",
+    "developerName": "djm07073",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/djm07073/loophony",
+    "defaultPrompt": [
+      "Create the main Loophony goal in my Linear project.",
+      "Show the current Loophony daemon report.",
+      "Help me resolve the open Loophony goal review."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

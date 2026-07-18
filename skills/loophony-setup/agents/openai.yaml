@@ -1,0 +1,4 @@
+interface:
+  display_name: "Loophony Setup"
+  short_description: "Install and bootstrap a local Loophony daemon"
+  default_prompt: "Use $loophony-setup to install and verify Loophony on this Mac."

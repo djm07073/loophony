@@ -88,8 +88,10 @@ No description was provided.
 - Symphony owns polling, claims, concurrency, retries, queue selection, workspaces, and Codex
   sessions.
 - Linear is the durable control plane and the human-facing history.
-- The installed Quant Agent plugin is a domain layer only. Use its `quant-research`,
-  `alpaca-market-data`, and market-data tools when relevant.
+- Use the installed Alpaca plugin only for read-only market data when relevant. Perform research,
+  coding, and verification with the normal Codex workspace tools.
+- Never use the Linear plugin from this worker turn. Symphony's tracker and `linear_graphql` tool
+  are the only Linear path for managed issue state.
 - The installed Loophony plugin is the Codex App operator plane. Never call its `loophony_*` tools
   from this worker turn; doing so would feed the orchestrator back into itself.
 - Never place a live order. Research and read-only/paper-data access are allowed. A paper-trading

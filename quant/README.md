@@ -20,9 +20,11 @@ quant-research worker. The former TypeScript goal loop is not part of this execu
   in local SQLite. One loop is exactly one Linear child issue, identified by its immutable
   `issue_id`.
 
-The globally installed Loophony plugin supplies the Codex App operator console. The separate Quant
-Agent plugin supplies only research and read-only Alpaca market-data capabilities. Symphony owns
-Linear scheduling; workers must not call `loophony_*` control tools from inside an issue turn.
+The globally installed Loophony plugin supplies the Codex App operator console. The official
+Alpaca plugin supplies read-only market-data capabilities, and the Linear plugin is available to
+the App for initial project provisioning and inspection. Symphony owns Linear scheduling and all
+managed-project writes; workers must not call `loophony_*` control tools or the Linear plugin from
+inside an issue turn.
 
 The workflow calls the Codex App's bundled CLI directly because it supports `app-server` and shares
 the App's installed plugins and authentication. The older Homebrew `codex` binary is not used.

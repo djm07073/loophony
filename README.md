@@ -16,11 +16,33 @@ _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), S
 
 This fork includes a single-worker, Linear-driven 24/7 quant research profile under
 [`quant/`](quant/README.md). It keeps the official Elixir orchestrator as the control plane and
-uses the installed Loophony plugin as its Codex App control plane and the Quant Agent plugin only
-for optional research and market-data capabilities. A local
+uses the installed Loophony plugin as its Codex App control plane and the Alpaca plugin for
+optional read-only market-data capabilities. A local
 SQLite checkpoint ledger carries observations, decisions, evidence, and next actions across fresh
 Codex sessions while Linear remains the human-facing record. Durable 10:00 and 22:00 KST review
 gates pause orchestration until the user explicitly maintains or adjusts the goal with feedback.
+
+### Install on another Mac
+
+Install the standalone bootstrap skill from this public repository:
+
+```sh
+python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
+  --repo djm07073/loophony \
+  --path skills/loophony-setup
+```
+
+Start a new Codex task and invoke `$loophony-setup`. It registers this repository as the
+`loophony-public` marketplace, installs the Loophony, Linear, and Alpaca plugins, clones and builds
+the daemon, renders local configuration, and can register the launchd service. Connector OAuth and
+Keychain secret entry remain explicit user steps.
+
+To install only the plugin:
+
+```sh
+/Applications/Codex.app/Contents/Resources/codex plugin marketplace add djm07073/loophony
+/Applications/Codex.app/Contents/Resources/codex plugin add loophony@loophony-public
+```
 
 ### Requirements
 

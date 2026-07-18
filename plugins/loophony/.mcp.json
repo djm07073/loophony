@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "loophony": {
+      "command": "node",
+      "args": ["./dist/mcp-server.mjs"],
+      "cwd": "."
+    }
+  }
+}
