@@ -34,8 +34,8 @@ the App's installed plugins and authentication. The older Homebrew `codex` binar
 2. Create label `symphony-quant` and apply it only to executable child issues.
 3. Create a Linear Project, a root `[Goal] ...` issue with measurable success criteria, and the
    persistent `[Agent Goal Review] Quant Research` issue without the `symphony-quant` label.
-4. Replace `replace-with-linear-project-slug`, `replace-with-linear-review-issue`, and
-   `@replace-with-linear-reviewer` in `WORKFLOW.md`.
+4. Render a local workflow copy with the Linear project slug, review issue, and reviewer. Prefer
+   the Loophony plugin's `loophony-setup` skill so the tracked `WORKFLOW.md` stays unchanged.
 5. Prepare a Git repository that stores research code, immutable data references, and result
    artifacts. Put its clone URL in the launchd plist as `QUANT_RESEARCH_REPO_URL`.
 6. Install the Elixir runtime and build Symphony:
@@ -59,6 +59,11 @@ the App's installed plugins and authentication. The older Homebrew `codex` binar
    The first item may contain a Linear personal API key or a currently valid OAuth access token.
    The present minimal runner does not yet refresh OAuth tokens; durable Linear OAuth refresh is a
    separate hardening item. Alpaca uses API keys, not OAuth, and remains read-only in this profile.
+
+The Loophony plugin bundles a `loophony-setup` skill that automates clone verification, plugin
+installation, local workflow rendering, the Elixir build, launchd registration, and health checks.
+It writes the rendered workflow outside the Git clone and selects it with
+`LOOPHONY_WORKFLOW_PATH`. Credential entry and connector OAuth remain explicit user steps.
 
 ## Run and supervise
 

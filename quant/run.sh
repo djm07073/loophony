@@ -4,6 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 state_root=${SYMPHONY_QUANT_STATE_ROOT:-"$HOME/.local/share/symphony-quant"}
+workflow_path=${LOOPHONY_WORKFLOW_PATH:-"$script_dir/WORKFLOW.md"}
 
 export SYMPHONY_QUANT_WORKSPACE_ROOT=${SYMPHONY_QUANT_WORKSPACE_ROOT:-"$state_root/workspaces"}
 export SYMPHONY_LOOP_DB_PATH=${SYMPHONY_LOOP_DB_PATH:-"$state_root/loop/symphony-loop.sqlite3"}
@@ -29,6 +30,11 @@ load_keychain_secret APCA_API_SECRET_KEY alpaca-api-secret-key
 : "${LINEAR_API_KEY:?Store Linear auth in Keychain account linear-api-token or export LINEAR_API_KEY}"
 : "${QUANT_RESEARCH_REPO_URL:?Set QUANT_RESEARCH_REPO_URL to the research repository clone URL}"
 
+if [ ! -f "$workflow_path" ]; then
+  echo "Loophony workflow not found: $workflow_path" >&2
+  exit 1
+fi
+
 mkdir -p "$state_root/logs" "$state_root/loop" "$SYMPHONY_QUANT_WORKSPACE_ROOT"
 
 cd "$repo_root/elixir"
@@ -47,4 +53,4 @@ fi
 exec mise exec -- ./bin/symphony \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails \
   --logs-root "$state_root/logs" \
-  "$script_dir/WORKFLOW.md"
+  "$workflow_path"
