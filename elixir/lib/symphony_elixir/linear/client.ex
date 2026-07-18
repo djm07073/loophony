@@ -17,6 +17,9 @@ defmodule SymphonyElixir.Linear.Client do
         identifier
         title
         description
+        project {
+          description
+        }
         priority
         state {
           name
@@ -62,6 +65,9 @@ defmodule SymphonyElixir.Linear.Client do
         identifier
         title
         description
+        project {
+          description
+        }
         priority
         state {
           name
@@ -453,6 +459,7 @@ defmodule SymphonyElixir.Linear.Client do
       identifier: issue["identifier"],
       title: issue["title"],
       description: issue["description"],
+      project_description: get_in(issue, ["project", "description"]),
       priority: parse_priority(issue["priority"]),
       state: get_in(issue, ["state", "name"]),
       branch_name: issue["branchName"],

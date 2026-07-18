@@ -1160,6 +1160,7 @@ defmodule SymphonyElixir.CoreTest do
       identifier: "MT-616",
       title: "Use rich templates for WORKFLOW.md",
       description: "Render with rich template variables",
+      project_description: "Canonical project objective",
       state: "In Progress",
       url: "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd",
       labels: ["templating", "workflow"]
@@ -1173,6 +1174,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
+    assert prompt =~ "Canonical Linear project objective:"
+    assert prompt =~ "Canonical project objective"
     assert prompt =~ "Current status: In Progress"
     assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
     assert prompt =~ "This is an unattended orchestration session."

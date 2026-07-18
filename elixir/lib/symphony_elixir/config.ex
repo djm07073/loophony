@@ -12,6 +12,13 @@ defmodule SymphonyElixir.Config do
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}
 
+  Canonical Linear project objective:
+  {% if issue.project_description %}
+  {{ issue.project_description }}
+  {% else %}
+  No project description provided.
+  {% endif %}
+
   Body:
   {% if issue.description %}
   {{ issue.description }}

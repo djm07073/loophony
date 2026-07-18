@@ -75,6 +75,16 @@ Issue:
 - Labels: {{ issue.labels }}
 - URL: {{ issue.url }}
 
+## Canonical project objective
+
+{% if issue.project_description %}
+{{ issue.project_description }}
+{% else %}
+No Linear project description was provided. Do not infer the objective from this issue or the
+scheduled review thread. Mark this issue Blocked because the canonical objective contract is
+missing.
+{% endif %}
+
 Description:
 
 {% if issue.description %}
@@ -101,8 +111,8 @@ No description was provided.
 
 ## Required kickoff
 
-1. Read the injected `Durable loop memory` first when present, then use `linear_graphql` to refresh
-   this issue, its project, parent/root goal, relations, and active
+1. Read the injected canonical project objective and `Durable loop memory` first when present,
+   then use `linear_graphql` to refresh this issue, its project, parent/root goal, relations, and active
    comments. Do not trust the initial prompt snapshot when newer Linear state exists.
 2. Resolve the root issue titled `[Goal] ...`. The Linear project description is the immutable big
    objective; the root issue contains measurable success criteria. Do not rewrite either unless a
