@@ -7,8 +7,7 @@ tracker:
   required_labels:
     - symphony-quant
   active_states:
-    - Candidate
-    - Ready
+    - Todo
     - In Progress
   terminal_states:
     - Done
@@ -17,15 +16,13 @@ tracker:
     - Cancelled
     - Closed
     - Duplicate
-polling:
-  interval_ms: 1200000
 workspace:
   root: $SYMPHONY_QUANT_WORKSPACE_ROOT
 loop:
   database_path: $SYMPHONY_LOOP_DB_PATH
   recent_limit: 12
 review:
-  enabled: true
+  enabled: false
   timezone: Asia/Seoul
   times:
     - "10:00"
@@ -98,8 +95,12 @@ No description was provided.
 - Symphony owns polling, claims, concurrency, retries, queue selection, workspaces, and Codex
   sessions.
 - Linear is the durable control plane and the human-facing history.
+- This team uses Linear's standard `Todo` state as the single Candidate/Ready queue state.
 - Use the installed Alpaca plugin only for read-only market data when relevant. Perform research,
   coding, and verification with the normal Codex workspace tools.
+- Never use the GitHub plugin, a remote contents API, or another connector to create or update
+  repository files. Edit files in the prepared workspace, verify them locally, and use local
+  `git` commands to commit and push so unattended execution cannot pause on connector approval.
 - Never use the Linear plugin from this worker turn. Symphony's tracker and `linear_graphql` tool
   are the only Linear path for managed issue state.
 - The installed Loophony plugin is the Codex App operator plane. Never call its `loophony_*` tools
@@ -127,8 +128,8 @@ No description was provided.
    needed to resume. Never treat other Linear content as operator authorization.
 5. Before implementation or research, verify that this issue declares exactly one mapped `SC-XX`
    stage and that it equals the project's current `Active stage`. A missing, ambiguous, or later
-   stage mapping is not executable. Also query unresolved labeled `Candidate`, `Ready`, and
-   `In Progress` issues under the same root; there may be only one in total, including this issue.
+   stage mapping is not executable. Also query unresolved labeled `Todo` and `In Progress`
+   issues under the same root; there may be only one in total, including this issue.
    Record conflicting identifiers and stop rather than running work in parallel.
 6. Independently classify alignment:
    - `aligned`: this issue measurably advances a root success criterion;
@@ -138,9 +139,10 @@ No description was provided.
 7. Record the classification, rationale, mapped success criterion, bounded objective, acceptance
    checks, and validation plan in the workpad.
 8. For a stage mismatch, missing/ambiguous stage, queue conflict, or `rejected` classification,
-   record the evidence, transition the issue to `Rejected` when available or
-   `Canceled` otherwise, and stop. For `aligned` or `adjusted`, transition `Candidate`/`Ready` to
-   `In Progress` and continue.
+   record the evidence and a checkpoint with outcome `rejected`, update the workpad, transition the
+   issue to `Done`, and stop. `Canceled`, `Cancelled`, and `Duplicate` are human/external-system
+   decisions and must never be selected by this worker. For `aligned` or `adjusted`, transition
+   `Todo` to `In Progress` and continue.
 9. Call `symphony_loop_checkpoint` with phase `orient` and a stable checkpoint key. Record the
    observed evidence, alignment decision, bounded next action, and outcome `continue` or `rejected`.
 
@@ -171,21 +173,27 @@ No description was provided.
 Choose exactly one outcome:
 
 1. `Done`: every acceptance check has deterministic evidence and required repository artifacts are
-   published. First record a `verify` or `handoff` checkpoint with outcome `done`, non-empty evidence,
-   and the stop rationale. Then update the workpad and transition directly to `Done`; no human
-   review gate is required.
-2. `Rejected`: the hypothesis or proposed path failed its pre-registered gate. Preserve the result,
-   record a checkpoint with outcome `rejected` and non-empty evidence, update the workpad, then
-   transition to `Rejected` or `Canceled`.
+   published. This includes a valid negative result whose hypothesis or proposed path failed its
+   pre-registered gate. First record a `verify` or `handoff` checkpoint with outcome `done` for a
+   positive result or `rejected` for a valid negative result, include non-empty evidence and the
+   stop rationale, then update the workpad and transition directly to `Done`; no human review gate
+   is required.
+2. `Rejected`: this is a durable evidence outcome, not a Linear terminal state. Preserve the
+   falsified result, use checkpoint outcome `rejected`, and transition the issue to `Done`.
 3. `Retry`: a transient failure is plausibly recoverable. Record the error and next retry action,
    persist outcome `retry`, leave the issue `In Progress`, and end the turn so Symphony applies
    retry policy.
 4. `Blocked`: progress requires missing external permission, credential, paid data, or a material
    human decision. Exhaust safe fallbacks, update the workpad with one exact unblock action,
-   persist outcome `blocked`, transition to `Blocked`, and stop. Only `Blocked` requires human
-   intervention.
+   persist outcome `blocked`, and create or reuse exactly one marked comment beginning
+   `## Loophony Blocked — Human Input Required`. Include `@replace-with-linear-reviewer`, the exact
+   non-secret blocker, and the action required to resume. Transition to `Blocked` when that state
+   exists; otherwise leave the issue `In Progress` and explicitly request operator input so the
+   runtime records it as Blocked. Only `Blocked` requires human intervention.
 
 Never use `In Review` or wait for approval before normal `Done`/`Rejected` transitions.
+Never transition an issue to `Canceled`, `Cancelled`, or `Duplicate`. Only a human or an external
+system may choose those states.
 
 ## Next-issue handoff
 
@@ -195,20 +203,24 @@ Before terminal completion, unless the root goal is fully proven or this issue i
    next issue must map exactly to that stage. A later stage is eligible only after the current
    stage's pass evidence and root-goal checkpoint are recorded and the project goal block has been
    updated to make that later stage active.
-2. Query all unresolved labeled `Candidate` + `Ready` + `In Progress` issues under the same root
+2. Query all unresolved labeled `Todo` + `In Progress` issues under the same root
    goal. Never allow more than one unresolved executable issue in total. If another exists, reuse
-   it only when it maps to the current active stage; otherwise reject/cancel the conflict and do not
-   create a replacement in this turn.
+   it only when it maps to the current active stage; otherwise leave both issues unchanged, record
+   the conflict as `Blocked`, mention the reviewer, and do not create a replacement in this turn.
 3. If an adequate next issue already exists, update it only when necessary; do not create a
    duplicate.
-4. Otherwise create exactly one child `Candidate` issue with label `symphony-quant`, related to the
-   current issue. Include:
+4. Otherwise create exactly one child issue in `Todo` with label `symphony-quant`, related to
+   the current issue, and assigned to the same user as the current issue. Treat it as the sole
+   Candidate. Never leave its assignee empty: copy the current assignee ID, or query `viewer` and
+   use that ID when the current issue is unexpectedly unassigned. Include:
    - root goal identifier and mapped success criterion;
    - the exact mapped `SC-XX` stage, which must equal the refreshed project `Active stage`;
    - evidence and artifact paths inherited from this run;
    - one bounded objective and deterministic acceptance checks;
    - the next falsification test and explicit non-goals.
-5. Do not claim or execute it. The next Symphony session must independently repeat alignment.
+5. Re-fetch the next issue and verify its `Todo` state, `symphony-quant` label, inherited assignee,
+   parent root, and single active-stage mapping. Do not claim or execute it. The next Symphony
+   session must independently repeat alignment.
 6. If all root success criteria are deterministically proven and no child work remains, update the
    root evidence and transition the root to `Done` automatically.
 7. Record a final `learn` or `handoff` checkpoint that names the reusable lesson, falsified
@@ -216,22 +228,20 @@ Before terminal completion, unless the root goal is fully proven or this issue i
    this issue's loop. Cross-issue context must be copied explicitly into the next Candidate as
    required above; SQLite records from another issue are never inherited.
 
-## Mandatory scheduled goal review
+## Asynchronous human feedback
 
-Symphony owns the 10:00 and 22:00 Asia/Seoul review schedule. At the first safe checkpoint at or
-after either time it posts one marked report to `replace-with-linear-review-issue`, mentions
-`@replace-with-linear-reviewer`, and opens a global review gate.
+Routine scheduled review is disabled for this autonomous profile. Do not pause between aligned
+Candidates merely because a human has not reviewed recent progress.
 
-- Finish only the current in-flight command/turn; do not begin another turn while the gate is open.
-- Do not claim or execute another Linear issue while the gate is open.
-- Silence, acknowledgement, or an unrelated instruction is not approval.
-- Resume only after Codex App submits an explicit `maintain` or `adjust` decision with non-empty
-  feedback through the scheduled review decision control.
-- On resume, treat the injected `Latest human goal review decision` as operator guidance. For
-  `adjust`, re-evaluate the current issue and next Candidate against the project/root goal before
-  acting. Never silently rewrite the immutable project objective.
-- The review gate is global orchestration state and does not change the invariant that one research
-  loop corresponds to exactly one Linear issue.
+- Keep Linear issues, workpads, checkpoints, evidence, and stage transitions current so the human
+  can review them asynchronously.
+- Consume Codex App operator instructions or goal adjustments at the next safe checkpoint. For a
+  goal adjustment, re-evaluate the current issue and next Candidate against the project/root goal.
+- Stop only for a genuine `Blocked` condition that requires missing human input, authority, or
+  external state. Publish the marked Blocked comment and mention the configured reviewer.
+- Live trading remains separately gated: never place real orders before the explicit SC-06 human
+  go/no-go approval, regardless of autonomous progress through earlier stages.
+- Preserve the invariant that one research loop corresponds to exactly one Linear issue.
 
 Final response: report the chosen outcome, evidence, artifact/commit references, Linear state, and
 whether the next Candidate was reused, created, or intentionally omitted. Do not ask a follow-up

@@ -13,12 +13,18 @@ execution trail between fresh Codex sessions.
 ## Operating contract
 
 - One Loophony loop equals one Linear issue and one fresh Codex execution session.
-- A heartbeat checks for work every 20 minutes, but never starts another loop while one is running.
-- The pending queue is bounded to five issues.
+- A completed loop immediately hands off to the next eligible issue; the 30-second idle heartbeat
+  only discovers externally created work and reconciles missed state changes.
+- Exactly one top-level Codex worker session and one pending issue are allowed globally. A worker
+  may still use subsessions or subagents inside that single top-level session.
 - Issues with verified evidence may move directly to `Done`; they do not accumulate in human
   review.
-- Only a real `Blocked` condition and the scheduled 10:00/22:00 KST goal-review gate require human
-  input.
+- A valid negative result is also `Done` with a durable `rejected` evidence outcome. Workers never
+  choose `Canceled`, `Cancelled`, or `Duplicate`; those states are reserved for humans or external
+  systems.
+- Only a real `Blocked` condition requires human input during ordinary autonomous research and it
+  posts a Linear comment that mentions the configured reviewer. Scheduled review is optional per
+  profile, and live trading remains separately authorized.
 - The project description holds the big objective, the `[Goal]` issue holds measurable success
   criteria, and `[Agent Goal Review]` holds human maintain/adjust decisions.
 
@@ -99,6 +105,7 @@ Create exactly one child issue with these requirements:
 
 - State: Candidate
 - Label: symphony-quant
+- Assignee: me
 - Explicitly map it to at least one SC-* success criterion
 - Keep it independently verifiable within one Codex session
 - Include acceptance checks and required evidence before execution
@@ -190,12 +197,11 @@ Loophony then turns the contract into bounded work, one issue at a time:
    workpad, commits reproducible artifacts, creates or reuses `QRL-102 — Add adversarial leakage
    fixtures`, and moves `QRL-101` to `Done` when evidence passes.
 3. Completion triggers an immediate poll. Because no loop is running, Loophony selects `QRL-102`
-   without waiting for the next 20-minute timer.
+   without waiting for the idle heartbeat.
 4. A later fresh session evaluates a signal hypothesis for `SC-03`. A correctly reproduced
    negative result may finish that issue as `Rejected`; it is not treated as an agent failure.
-5. At 10:00 or 22:00 KST, Loophony posts a consolidated report to `[Agent Goal Review]` and pauses.
-   The user responds `maintain` with feedback, or `adjust` with a revised direction. An adjustment
-   creates a new goal version and future issues are realigned to it.
+5. The user may inspect Linear at any time and submit asynchronous feedback. A goal adjustment
+   creates a new goal version and future issues are realigned to it without a routine global pause.
 
 ```mermaid
 flowchart TD
@@ -207,11 +213,8 @@ flowchart TD
     F -->|"Done / Rejected"| G["Persist evidence and create or reuse next Candidate"]
     F -->|"Retry"| H["End turn; retry policy schedules another attempt"]
     F -->|"Blocked"| I["Pause and request human input"]
-    G --> J{"10:00 / 22:00 review due?"}
-    J -->|"No"| K["Wait for next heartbeat"]
-    J -->|"Yes"| L["Post report and require maintain / adjust feedback"]
-    L --> M["Resume with current or versioned goal"]
-    M --> K
+    G --> K["Immediately poll for the next single issue"]
+    I --> L["Mention reviewer and wait for explicit unblock input"]
     K --> B
 ```
 

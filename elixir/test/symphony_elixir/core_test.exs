@@ -16,7 +16,8 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
-    assert config.agent.max_queued_issues == 5
+    assert config.agent.max_concurrent_agents == 1
+    assert config.agent.max_queued_issues == 1
     assert config.agent.max_turns == 20
     assert config.loop.recent_limit == 12
     assert config.loop.database_path == Path.join(config.workspace.root, "_loop/symphony-loop.sqlite3")
@@ -46,6 +47,14 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), max_queued_issues: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_queued_issues"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_queued_issues: 5)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_queued_issues"
+
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: 2)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_concurrent_agents"
 
     write_workflow_file!(Workflow.workflow_file_path(), loop_recent_limit: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()

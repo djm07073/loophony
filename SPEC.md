@@ -420,6 +420,12 @@ interpreted as approval.
 This gate is global orchestration state and MUST NOT merge checkpoint history between issue-scoped
 loops.
 
+The configured `reviewer` is also the notification target for runtime input-required or
+approval-required blocks. On transition into such a `Blocked` state, the implementation MUST
+publish a marked comment on the affected tracker issue that mentions the reviewer, states the
+non-secret reason, and directs the reviewer to the operator control plane. The scheduled review
+report remains the sole notification for review-gate pauses and MUST NOT be duplicated per issue.
+
 #### 5.3.6 `hooks` (object)
 
 Fields:
@@ -634,8 +640,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.after_run`: shell script or null
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
-- `agent.max_concurrent_agents`: integer, default `10`
-- `agent.max_queued_issues`: integer, default `5`
+- `agent.max_concurrent_agents`: integer, fixed value and default `1`
+- `agent.max_queued_issues`: integer, fixed value and default `1`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
@@ -706,6 +712,11 @@ A run attempt transitions through these phases:
 
 Distinct terminal reasons are important because retry logic and logs differ.
 
+For Loophony-managed Linear workflows, a falsified hypothesis is a successful evidence-producing
+run: persist outcome `rejected` and close the issue as `Done`. The worker MUST NOT transition issues
+to `Canceled`, `Cancelled`, or `Duplicate`; those tracker states are reserved for explicit human or
+external-system decisions.
+
 ### 7.3 Transition Triggers
 
 - `Poll Tick`
@@ -760,7 +771,7 @@ Tick sequence:
 2. Run dispatch preflight validation.
 3. Fetch candidate issues from tracker using active states.
 4. Sort issues by dispatch priority.
-5. Exclude running, claimed, and blocked issues, then retain at most `agent.max_queued_issues`.
+5. Exclude running, claimed, and blocked issues, then retain at most one pending issue.
 6. Dispatch queued issues while slots remain.
 7. Notify observability/status consumers of state changes.
 
@@ -793,12 +804,12 @@ Sorting order (stable intent):
 
 Global limit:
 
-- `available_slots = max(max_concurrent_agents - running_count, 0)`
+- `available_slots = max(1 - running_count, 0)`
 
 Per-state limit:
 
 - `max_concurrent_agents_by_state[state]` if present (state key normalized)
-- otherwise fallback to global limit
+- otherwise fallback to the global limit; a per-state value can never raise the global limit of one
 
 The runtime counts issues by their current tracked state in the `running` map.
 
@@ -2190,7 +2201,7 @@ Use the same validation profiles as Section 17:
 - Typed config layer with defaults and `$` resolution
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
-- Bounded pending dispatch queue (`agent.max_queued_issues`, default 5)
+- Single pending dispatch slot (`agent.max_queued_issues`, fixed at `1`)
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)

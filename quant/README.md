@@ -8,14 +8,14 @@ quant-research worker. The former TypeScript goal loop is not part of this execu
 - Linear Project: immutable big objective and the human-visible system of record.
 - `[Goal]` issue: measurable success criteria. Do not give it the `symphony-quant` label.
 - Child issue: one isolated Codex session and one bounded research/coding objective.
-- Pending queue: `Candidate` + `Ready`, maximum five. Running work is separate.
+- Pending queue: maximum one. Running work is separate.
 - Concurrency: one.
-- Wake-up: a 20-minute idle heartbeat/watchdog. Terminal completion triggers an immediate poll, so
+- Wake-up: a 30-second idle heartbeat/watchdog. Terminal completion triggers an immediate poll, so
   the next issue starts after the prior issue exits rather than waiting for the timer.
 - Terminal decisions: `Done` and `Rejected` are automatic when evidence passes the workflow rules.
   Only `Blocked` waits for a human.
-- Human review gate: at the first safe checkpoint at or after 10:00 and 22:00 KST, publish a
-  Linear report and pause all new work until the user submits `maintain` or `adjust` with feedback.
+- Human feedback: asynchronous through Linear/Codex operator input; routine scheduled review does
+  not pause work. Genuine `Blocked` conditions and the SC-06 live-trading decision remain gated.
 - Loop memory: structured `observe → orient → act → verify → learn/handoff` checkpoints are stored
   in local SQLite. One loop is exactly one Linear child issue, identified by its immutable
   `issue_id`.
@@ -54,11 +54,14 @@ the App's installed plugins and authentication. The older Homebrew `codex` binar
 
    ```sh
    security add-generic-password -U -s symphony-quant -a linear-api-token -w
+   security add-generic-password -U -s symphony-quant -a linear-notifier-api-token -w
    security add-generic-password -U -s symphony-quant -a alpaca-api-key-id -w
    security add-generic-password -U -s symphony-quant -a alpaca-api-secret-key -w
    ```
 
    The first item may contain a Linear personal API key or a currently valid OAuth access token.
+   When present, `linear-notifier-api-token` is preferred as the separate Linear agent identity for
+   all issue reads, updates, and comments; reviewer mentions still target the configured human.
    The present minimal runner does not yet refresh OAuth tokens; durable Linear OAuth refresh is a
    separate hardening item. Alpaca uses API keys, not OAuth, and remains read-only in this profile.
 
@@ -83,10 +86,10 @@ adjustments, or unblock decisions as Linear comments. A running turn consumes in
 safe continuation checkpoint; it is not interrupted mid-command. `unblock` additionally returns the
 target issue to `Ready`.
 
-At the 10:00 and 22:00 KST review windows, `loophony_status` reports an open `review_gate` and the
-daemon stops dispatching new issues. Use `loophony_submit_review_decision` with `maintain` or
-`adjust` plus non-empty feedback. The decision is written to the review issue and SQLite before
-dispatch resumes. Silence never counts as approval.
+This autonomous profile disables scheduled review gates. Inspect Linear whenever convenient and use
+operator `instruction` or `goal_adjustment` input for asynchronous feedback; an active command is
+not interrupted and consumes the input at its next safe checkpoint. A true `Blocked` state still
+requires explicit unblock input, and SC-06 still requires explicit live-trading approval.
 
 ## Loop engineering and local state
 
@@ -110,13 +113,12 @@ its alignment with the root goal.
 
 The JSON status API and Codex App report expose the checkpoint count, outcome totals, and recent
 loop decisions. If the database is temporarily unavailable, the status report marks loop memory
-unavailable. With mandatory review enabled, dispatch fails closed because Symphony cannot safely
+unavailable. When scheduled review is explicitly enabled, dispatch fails closed because Symphony cannot safely
 prove that the human gate was resolved.
 
-The scheduled review gate is orchestration state, not another research loop. It can pause an issue
-after its current Codex turn reaches a safe boundary, but it does not merge SQLite checkpoints
-between issues. The latest resolved human decision is injected as operator guidance when work
-resumes.
+When enabled for another profile, the scheduled review gate is orchestration state, not another
+research loop. It does not merge SQLite checkpoints between issues. This autonomous profile instead
+accepts human feedback asynchronously without a routine global pause.
 
 After the smoke test, edit the repository URL in `launchd/com.suhajin.symphony-quant.plist`, copy it
 to `~/Library/LaunchAgents`, and bootstrap it with `launchctl`. `RunAtLoad` plus `KeepAlive` restarts

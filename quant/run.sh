@@ -23,11 +23,12 @@ load_keychain_secret() {
   fi
 }
 
+load_keychain_secret LINEAR_API_KEY linear-notifier-api-token
 load_keychain_secret LINEAR_API_KEY linear-api-token
 load_keychain_secret APCA_API_KEY_ID alpaca-api-key-id
 load_keychain_secret APCA_API_SECRET_KEY alpaca-api-secret-key
 
-: "${LINEAR_API_KEY:?Store Linear auth in Keychain account linear-api-token or export LINEAR_API_KEY}"
+: "${LINEAR_API_KEY:?Store Linear agent auth in Keychain account linear-notifier-api-token or linear-api-token}"
 : "${QUANT_RESEARCH_REPO_URL:?Set QUANT_RESEARCH_REPO_URL to the research repository clone URL}"
 
 if [ ! -f "$workflow_path" ]; then

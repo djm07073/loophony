@@ -12,6 +12,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @top_level_session_limit 1
+  @pending_issue_limit 1
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -234,7 +236,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    block_issue_from_entry(state, issue_id, running_entry, error, :runtime)
   end
 
   defp block_review_gate_agent_down(state, issue_id, running_entry, session_id) do
@@ -242,9 +244,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Agent paused at goal-review gate for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}")
 
-    state
-    |> block_issue_from_entry(issue_id, running_entry, error)
-    |> put_block_type(issue_id, :review_gate)
+    block_issue_from_entry(state, issue_id, running_entry, error, :review_gate)
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
@@ -843,10 +843,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
     stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    block_issue_from_entry(state, issue_id, running_entry, error, :runtime)
   end
 
-  defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
+  defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error, block_type) do
     blocked_entry = %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
@@ -855,11 +855,14 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: Map.get(running_entry, :workspace_path),
       session_id: running_entry_session_id(running_entry),
       error: error,
+      block_type: block_type,
       blocked_at: DateTime.utc_now(),
       last_codex_message: Map.get(running_entry, :last_codex_message),
       last_codex_event: Map.get(running_entry, :last_codex_event),
       last_codex_timestamp: Map.get(running_entry, :last_codex_timestamp)
     }
+
+    maybe_publish_blocked_report(blocked_entry)
 
     %{
       state
@@ -870,9 +873,55 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp put_block_type(%State{} = state, issue_id, block_type) do
-    blocked = Map.update!(state.blocked, issue_id, &Map.put(&1, :block_type, block_type))
-    %{state | blocked: blocked}
+  defp maybe_publish_blocked_report(%{block_type: :runtime} = blocked_entry) do
+    reviewer = Config.settings!().review.reviewer
+
+    case reviewer_mention(reviewer) do
+      nil ->
+        Logger.warning("Unable to publish Blocked mention for issue_identifier=#{blocked_entry.identifier}: review.reviewer is not configured")
+
+      mention ->
+        case Tracker.create_comment(blocked_entry.issue_id, blocked_report(blocked_entry, mention)) do
+          :ok ->
+            Logger.info("Published Blocked reviewer mention for issue_identifier=#{blocked_entry.identifier}")
+
+          {:error, reason} ->
+            Logger.warning("Unable to publish Blocked reviewer mention for issue_identifier=#{blocked_entry.identifier}: #{inspect(reason)}")
+        end
+    end
+
+    :ok
+  end
+
+  defp maybe_publish_blocked_report(_blocked_entry), do: :ok
+
+  defp reviewer_mention(reviewer) when is_binary(reviewer) do
+    case String.trim(reviewer) do
+      "" -> nil
+      "@" <> _ = mention -> mention
+      handle -> "@#{handle}"
+    end
+  end
+
+  defp reviewer_mention(_reviewer), do: nil
+
+  defp blocked_report(blocked_entry, reviewer) do
+    """
+    ## Loophony Blocked — Human Input Required
+
+    <!-- loophony-blocked:#{blocked_entry.identifier}:#{blocked_entry.session_id} -->
+    #{reviewer}
+
+    Loophony paused `#{blocked_entry.identifier}` because it requires human input before it can
+    continue.
+
+    - Reason: #{blocked_entry.error}
+    - Blocked at: #{DateTime.to_iso8601(blocked_entry.blocked_at)}
+
+    Open Codex App and submit an explicit `unblock` instruction for this issue. Do not place
+    credentials or secrets in Linear.
+    """
+    |> String.trim()
   end
 
   defp choose_issues(issues, state) do
@@ -897,7 +946,7 @@ defmodule SymphonyElixir.Orchestrator do
     issues
     |> sort_issues_for_dispatch()
     |> Enum.filter(&queue_eligible_issue?(&1, state, active_states, terminal_states))
-    |> Enum.take(Config.settings!().agent.max_queued_issues)
+    |> Enum.take(@pending_issue_limit)
   end
 
   defp drop_claimed_queued_issues(%State{} = state) do
@@ -1488,11 +1537,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp available_slots(%State{} = state) do
-    max(
-      (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
-        map_size(state.running),
-      0
-    )
+    max(@top_level_session_limit - map_size(state.running), 0)
   end
 
   @spec request_refresh() :: map() | :unavailable

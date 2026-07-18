@@ -1,6 +1,6 @@
 ```text
 ╭─ SYMPHONY STATUS
-│ Agents: 1/10
+│ Agents: 1/1
 │ Throughput: 15 tps
 │ Runtime: 45m 0s
 │ Tokens: in 18,000 | out 2,200 | total 20,200

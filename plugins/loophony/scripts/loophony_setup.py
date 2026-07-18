@@ -99,6 +99,7 @@ def preflight_payload() -> dict[str, object]:
         "codex_app_cli": DEFAULT_CODEX.is_file() and os.access(DEFAULT_CODEX, os.X_OK),
         "keychain": {
             "linear_api_token": keychain_item_exists("linear-api-token"),
+            "linear_notifier_api_token": keychain_item_exists("linear-notifier-api-token"),
             "alpaca_api_key_id": keychain_item_exists("alpaca-api-key-id"),
             "alpaca_api_secret_key": keychain_item_exists("alpaca-api-secret-key"),
         },

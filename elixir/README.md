@@ -112,8 +112,8 @@ hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
 agent:
-  max_concurrent_agents: 10
-  max_queued_issues: 5
+  max_concurrent_agents: 1
+  max_queued_issues: 1
   max_turns: 20
 codex:
   command: codex app-server
@@ -144,22 +144,26 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
-- `agent.max_queued_issues` bounds the sorted pending candidate window. Running, claimed, and
-  blocked issues are tracked separately. Default: `5`.
+- `agent.max_concurrent_agents` and `agent.max_queued_issues` are fixed at `1`. Values other than
+  `1` are invalid. This guarantees one top-level Codex worker and one pending candidate globally;
+  subsessions or subagents created inside the active worker remain available.
 - `loop.database_path` selects the local SQLite checkpoint ledger. It defaults to
   `<workspace.root>/_loop/symphony-loop.sqlite3` and may use `$VAR`.
 - `loop.recent_limit` controls how many recent checkpoints appear in status and fresh-session
   context. Default: `12`; valid range: `1..100`.
 - Stable checkpoint keys are idempotent per issue. Terminal `done` and `rejected` checkpoints
   require non-empty evidence.
+- `rejected` is an evidence outcome for a valid negative result; the managed Linear issue still
+  closes as `Done`. Workers must not choose `Canceled`, `Cancelled`, or `Duplicate`.
 - `review.enabled` activates a durable, global human-feedback gate. This implementation supports
   `Asia/Seoul`; `review.times` defaults to `10:00` and `22:00`.
 - Enabled review requires a persistent `review.issue_identifier` and Linear `review.reviewer`.
   The first poll after each window posts a report, pauses new dispatch, and waits for explicit
-  `maintain` or `adjust` feedback.
+  `maintain` or `adjust` feedback. The same reviewer is mentioned on the affected issue when a
+  runtime input or approval request puts work into `Blocked`.
 - When a completed worker has moved its issue out of the active states, Symphony immediately polls
-  for the next issue. `polling.interval_ms` therefore acts as an idle heartbeat and watchdog rather
-  than adding a fixed delay between completed issues.
+  for the next single issue. `polling.interval_ms` is only an idle heartbeat and watchdog; it never
+  adds a fixed delay between completed issues.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

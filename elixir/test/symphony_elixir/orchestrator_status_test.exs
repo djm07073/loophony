@@ -1175,9 +1175,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator blocks failed workers after app-server reports input required" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
-
     issue_id = "issue-input-required"
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{id: issue_id, identifier: "MT-INPUT", state: "In Progress"}
+    ])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      review_reviewer: "@owner"
+    )
+
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredBlockOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1223,8 +1234,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert %{
              identifier: "MT-INPUT",
-             error: "codex turn requires operator input"
+             error: "codex turn requires operator input",
+             block_type: :runtime
            } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comment, ^issue_id, alert}
+    assert alert =~ "Loophony Blocked — Human Input Required"
+    assert alert =~ "@owner"
+    assert alert =~ "MT-INPUT"
+    assert alert =~ "codex turn requires operator input"
   end
 
   test "orchestrator blocks normal worker exits after input required completion" do

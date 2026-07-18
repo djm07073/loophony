@@ -510,8 +510,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
   end
 
-  test "orchestrator bounds the pending dispatch queue and excludes claimed work" do
-    write_workflow_file!(Workflow.workflow_file_path(), max_queued_issues: 5)
+  test "orchestrator keeps exactly one pending issue and excludes claimed work" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_queued_issues: 1)
 
     state = %Orchestrator.State{
       max_concurrent_agents: 1,
@@ -535,7 +535,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     queued = Orchestrator.queued_issues_for_dispatch_for_test(issues, state)
 
-    assert Enum.map(queued, & &1.identifier) == ["MT-1", "MT-3", "MT-4", "MT-5", "MT-6"]
+    assert Enum.map(queued, & &1.identifier) == ["MT-1"]
+  end
+
+  test "orchestrator never dispatches a second top-level worker" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      max_concurrent_agents_by_state: %{"Todo" => 3}
+    )
+
+    running_issue = %Issue{
+      id: "running-1",
+      identifier: "MT-1000",
+      title: "Already running",
+      state: "Todo"
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{"running-1" => %{issue: running_issue}},
+      claimed: MapSet.new(["running-1"]),
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    next_issue = %Issue{
+      id: "next-1",
+      identifier: "MT-1001",
+      title: "Must wait",
+      state: "Todo"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(next_issue, state)
   end
 
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
@@ -829,8 +859,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.required_labels == []
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
-    assert config.agent.max_concurrent_agents == 10
-    assert config.agent.max_queued_issues == 5
+    assert config.agent.max_concurrent_agents == 1
+    assert config.agent.max_queued_issues == 1
     assert config.codex.command == "codex app-server"
 
     assert config.codex.approval_policy == %{
@@ -1044,7 +1074,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     workflow = """
     ---
     agent:
-      max_concurrent_agents: 10
+      max_concurrent_agents: 1
       max_concurrent_agents_by_state:
         todo: 1
         "In Progress": 4
@@ -1054,12 +1084,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     File.write!(Workflow.workflow_file_path(), workflow)
 
-    assert Config.settings!().agent.max_concurrent_agents == 10
+    assert Config.settings!().agent.max_concurrent_agents == 1
     assert Config.max_concurrent_agents_for_state("Todo") == 1
     assert Config.max_concurrent_agents_for_state("In Progress") == 4
     assert Config.max_concurrent_agents_for_state("In Review") == 2
-    assert Config.max_concurrent_agents_for_state("Closed") == 10
-    assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
+    assert Config.max_concurrent_agents_for_state("Closed") == 1
+    assert Config.max_concurrent_agents_for_state(:not_a_string) == 1
 
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 2)
     assert :ok = Config.validate!()

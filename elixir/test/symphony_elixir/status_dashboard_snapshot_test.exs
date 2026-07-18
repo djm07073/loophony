@@ -55,16 +55,6 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
              turn_count: 11,
              last_codex_event: "turn_completed",
              last_codex_message: turn_completed_message("completed")
-           }),
-           running_entry(%{
-             identifier: "MT-102",
-             session_id: "thread-abcdef1234567890",
-             codex_app_server_pid: "5252",
-             codex_total_tokens: 89_200,
-             runtime_seconds: 412,
-             turn_count: 4,
-             last_codex_event: "codex/event/task_started",
-             last_codex_message: exec_command_message("mix test --cover")
            })
          ],
          retrying: [],
@@ -244,16 +234,6 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
       message: %{
         "method" => "turn/completed",
         "params" => %{"turn" => %{"status" => status}}
-      }
-    }
-  end
-
-  defp exec_command_message(command) do
-    %{
-      event: :notification,
-      message: %{
-        "method" => "codex/event/exec_command_begin",
-        "params" => %{"msg" => %{"command" => command}}
       }
     }
   end
