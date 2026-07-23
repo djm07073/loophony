@@ -27,7 +27,31 @@ defmodule SymphonyElixir.CoreTest do
     assert config.intake.enabled == false
     assert config.intake.todo_state == "Todo"
     assert config.intake.max_claims_per_poll == 1
+    assert config.handoff.enabled == false
+    assert config.handoff.planner_model == "gpt-5.6-sol"
+    assert config.handoff.default_execution_model == "gpt-5.3-codex-spark"
     assert config.goal_policy.enforce_single_in_progress
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      handoff_enabled: true,
+      handoff_allowed_models: [
+        " gpt-5.6-sol ",
+        "",
+        "gpt-5.3-codex-spark",
+        "gpt-5.3-codex-spark"
+      ]
+    )
+
+    assert Config.settings!().handoff.allowed_models == ["gpt-5.6-sol", "gpt-5.3-codex-spark"]
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      handoff_enabled: true,
+      handoff_planner_model: "gpt-5.6-sol",
+      handoff_default_execution_model: "unknown-model"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "handoff.default_execution_model"
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -169,7 +193,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt() == prompt
   end
 
-  test "bundled workflows route bounded coding to Spark and keep acceptance with Sol" do
+  test "bundled workflows route issue handoffs to Spark or Sol execution sessions" do
     workflow_paths = [
       Path.expand("../../WORKFLOW.md", __DIR__),
       Path.expand("../../../quant/WORKFLOW.md", __DIR__)
@@ -180,12 +204,13 @@ defmodule SymphonyElixir.CoreTest do
 
       assert workflow =~ ~s(model="gpt-5.6-sol")
       assert workflow =~ "model_reasoning_effort=medium"
-      assert workflow =~ ~s(agents.default_subagent_model="gpt-5.3-codex-spark")
-      assert workflow =~ "agents.default_subagent_reasoning_effort=high"
-      assert workflow =~ "requires source-code or test-file edits"
-      assert workflow =~ ~r/exactly one\s+(?:coding )?subagent/
-      assert workflow =~ "parent"
-      assert workflow =~ "validation"
+      assert workflow =~ "handoff:"
+      assert workflow =~ "planner_model: gpt-5.6-sol"
+      assert workflow =~ "default_execution_model: gpt-5.3-codex-spark"
+      assert workflow =~ "loophony-handoff:v1"
+      assert workflow =~ "gpt-5.3-codex-spark"
+      assert workflow =~ "gpt-5.6-sol"
+      assert workflow =~ "fresh"
     end
   end
 
@@ -758,6 +783,48 @@ defmodule SymphonyElixir.CoreTest do
     checkpoint = %{phase: "verify", outcome: "rejected", next_action: "next_candidate=MT-604"}
 
     refute AgentRunner.terminal_handoff_ready_for_test(current, [successor], [checkpoint])
+  end
+
+  test "enabled handoff requires a successor marker tied to the source and permits Spark or Sol" do
+    write_workflow_file!(Workflow.workflow_file_path(), handoff_enabled: true)
+
+    current = %Issue{id: "current", identifier: "MT-605", state: "Done"}
+    handoff = %{phase: "handoff", outcome: "done", next_action: "next_candidate=MT-606"}
+    unmarked = %Issue{id: "unmarked", identifier: "MT-606", state: "Todo"}
+
+    wrong_source = %Issue{
+      id: "wrong-source",
+      identifier: "MT-607",
+      state: "Todo",
+      description: "<!-- loophony-handoff:v1 source_issue_id=other target_model=gpt-5.3-codex-spark -->"
+    }
+
+    refute AgentRunner.terminal_handoff_ready_for_test(current, [unmarked], [handoff])
+    refute AgentRunner.terminal_handoff_ready_for_test(current, [wrong_source], [handoff])
+
+    for model <- ["gpt-5.3-codex-spark", "gpt-5.6-sol"] do
+      successor = %Issue{
+        id: "successor-#{model}",
+        identifier: "MT-606",
+        state: "Todo",
+        description: "<!-- loophony-handoff:v1 source_issue_id=current target_model=#{model} -->"
+      }
+
+      assert AgentRunner.terminal_handoff_ready_for_test(current, [successor], [handoff])
+    end
+
+    in_progress_successor = %Issue{
+      id: "successor-in-progress",
+      identifier: "MT-606",
+      state: "In Progress",
+      description: "<!-- loophony-handoff:v1 source_issue_id=current target_model=gpt-5.6-sol -->"
+    }
+
+    refute AgentRunner.terminal_handoff_ready_for_test(
+             current,
+             [in_progress_successor],
+             [handoff]
+           )
   end
 
   test "three consecutive blocked checkpoints stop max-turn redispatch" do

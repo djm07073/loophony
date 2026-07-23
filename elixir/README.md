@@ -123,6 +123,11 @@ intake:
   todo_state: Todo
   completed_state: Done
   max_claims_per_poll: 1
+handoff:
+  enabled: true
+  planner_model: gpt-5.6-sol
+  default_execution_model: gpt-5.3-codex-spark
+  allowed_models: [gpt-5.6-sol, gpt-5.3-codex-spark]
 budget:
   enabled: true
   max_tokens_per_issue: 5000000
@@ -174,10 +179,15 @@ Notes:
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- The bundled workflows keep the top-level planning and review session on `gpt-5.6-sol`, while
-  setting `agents.default_subagent_model` to `gpt-5.3-codex-spark`. Their prompt delegates a
-  bounded source-code/test implementation to one Spark subagent only when repository edits are
-  required; the parent session reviews the shared-workspace diff and owns final validation.
+- `handoff.enabled` routes each issue to a top-level model at `thread/start`. Unmarked issues use
+  `handoff.planner_model`. A successor description containing exactly one
+  `loophony-handoff:v1` marker uses its allowed `target_model`, so a Sol judgment session can hand
+  bounded implementation/tests to a fresh Spark session or complex implementation to a fresh Sol
+  session.
+- Handoff startup fails closed unless the source issue is distinct and terminal. Terminal
+  completion fails closed unless Linear contains a distinct marked Todo successor tied to the
+  current issue and named in the final checkpoint, or the checkpoint records an explicit root-goal
+  termination reason.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
@@ -208,9 +218,10 @@ Notes:
   `[Work]` issue with the same project, team, assignee, labels, and priority. Only Work issues enter
   the normal dispatch queue. Description markers recover an existing Work issue after restart, so
   a partially completed claim does not create a duplicate. The Human source stays in Todo while
-  Work is open, avoiding a second In Progress record. A terminal Work issue moves its source Human
-  issue to `intake.completed_state`. Human and Work descriptions inherit the source issue's mapped
-  goal stage so goal-policy validation remains valid.
+  Work or any marked downstream handoff issue is open, avoiding a second In Progress record. Only
+  completion of the entire handoff chain moves its source Human issue to
+  `intake.completed_state`. Human and Work descriptions inherit the source issue's mapped goal
+  stage so goal-policy validation remains valid.
 - `budget.on_exhausted: warn` records a one-time Linear warning and audit event while work
   continues. `block` remains an explicit fail-closed option. `wait` pauses a daily-token-only
   exhaustion until the next UTC day; issue token or runtime limits still block in `wait` mode.
@@ -252,7 +263,9 @@ Notes:
   for the next single issue. `polling.interval_ms` is only an idle heartbeat and watchdog; it never
   adds a fixed delay between completed issues.
 - A worker cannot leave an issue terminal unless a terminal `learn`/`handoff` checkpoint exists and
-  the tracker can re-read a different eligible Candidate. If either proof is missing, Symphony
+  the tracker can re-read a different eligible Candidate. With handoff routing enabled, that
+  Candidate must be Todo, contain one valid marker pointing to the current immutable issue ID, use
+  an allowed target model, and be named in the checkpoint. If any proof is missing, Symphony
   restores the issue to `In Progress` and continues or retries the same worker. A fully proven root
   may omit a successor only with `termination_reason=<reason>` in the checkpoint.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue

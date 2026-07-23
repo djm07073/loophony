@@ -27,6 +27,13 @@ intake:
   todo_state: Todo
   completed_state: Done
   max_claims_per_poll: 1
+handoff:
+  enabled: true
+  planner_model: gpt-5.6-sol
+  default_execution_model: gpt-5.3-codex-spark
+  allowed_models:
+    - gpt-5.6-sol
+    - gpt-5.3-codex-spark
 budget:
   enabled: false
 goal_policy:
@@ -50,7 +57,7 @@ agent:
   max_queued_issues: 1
   max_turns: 20
 codex:
-  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.6-sol"' --config model_reasoning_effort=medium --config 'agents.default_subagent_model="gpt-5.3-codex-spark"' --config agents.default_subagent_reasoning_effort=high app-server
+  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.6-sol"' --config model_reasoning_effort=medium app-server
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
@@ -237,12 +244,24 @@ Use this only when completion is blocked by missing required tools or missing au
 2.  If current issue state is `Todo`, move it to `In Progress`; otherwise leave the current state unchanged.
 3.  Load the existing workpad comment and treat it as the active execution checklist.
     - Edit it liberally whenever reality changes (scope, risks, validation approach, discovered tasks).
-4.  If completing the issue requires source-code or test-file edits, delegate the bounded implementation to exactly one subagent before making those edits yourself:
-    - The subagent uses the configured default model `gpt-5.3-codex-spark` and works in the shared issue workspace.
-    - Give it the issue's bounded objective, relevant reproduction evidence, acceptance criteria, file scope, and required tests. Instruct it to implement and run targeted validation, then return a concise summary of changed files and results.
-    - Wait for it to finish. The parent worker remains responsible for inspecting the complete diff, running or confirming required validation, correcting any gaps itself, and deciding whether the issue is complete.
-    - Do not delegate planning, Linear updates, acceptance decisions, final review, publishing, or non-coding work. Do not create a coding subagent when no repository edit is required.
-    - If subagent startup is unavailable or fails, record that fact in the workpad and implement in the parent session; this is not an external blocker.
+4.  Obey the injected Loophony session role before editing:
+    - An unmarked issue is a `gpt-5.6-sol` planning/judgment session. Reproduce the problem, decide
+      the bounded implementation and validation contract, then create or reuse one linked Todo
+      execution issue. Do not make the successor's source/test edits in this session.
+    - Put exactly one marker in the successor description:
+      `<!-- loophony-handoff:v1 source_issue_id=<CURRENT_LINEAR_ISSUE_ID> target_model=<MODEL> -->`.
+      Use `gpt-5.3-codex-spark` for clear, bounded coding and tests. Use `gpt-5.6-sol` when the
+      implementation still requires architecture, ambiguity resolution, or high-risk judgment.
+    - Copy reproduction evidence, file scope, implementation steps, deterministic acceptance
+      checks, validation commands, risks, and non-goals into the successor. Link it to this issue,
+      keep it Todo, record a terminal handoff checkpoint, and finish this issue without executing
+      the successor.
+    - A marked execution issue runs as a fresh top-level session on its selected model and performs
+      its own bounded implementation and tests. It may create another Spark or Sol handoff issue
+      when a distinct cycle remains, but it never executes that successor in the same session.
+    - A legacy issue that already contains uncommitted implementation or an active durable wait
+      when this policy is introduced may finish that existing bounded cycle. All newly discovered
+      coding cycles must use the issue handoff contract.
 5.  Implement against the hierarchical TODOs and keep the comment current:
     - Check off completed items.
     - Add newly discovered items in the appropriate section.

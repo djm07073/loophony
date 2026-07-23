@@ -11,17 +11,19 @@ quant-research worker. The former TypeScript goal loop is not part of this execu
 - Internal pending dispatch window: maximum one. Linear may hold multiple Todo issues; running
   work is separate and at most one executable issue may be In Progress.
 - Concurrency: one.
-- Model routing: one `gpt-5.6-sol` medium parent owns planning, research decisions, review, and
-  acceptance. Only a bounded source/test implementation is delegated to one
-  `gpt-5.3-codex-spark` medium subagent in the same issue workspace; non-coding issues do not spawn
-  it.
+- Model routing: every unmarked issue starts as a `gpt-5.6-sol` medium planning/judgment session.
+  When coding is required, Sol creates or reuses a linked Todo issue containing one durable
+  `loophony-handoff:v1` marker and the complete implementation/test contract. That issue starts a
+  fresh top-level `gpt-5.3-codex-spark` session for bounded work, or another `gpt-5.6-sol` session
+  when material architectural or risk judgment remains.
 - Wake-up: a 30-second idle heartbeat/watchdog. Terminal completion triggers an immediate poll, so
   the next issue starts after the prior issue exits rather than waiting for the timer.
 - Terminal decisions: `Done` and `Rejected` are automatic when evidence passes the workflow rules.
   Only `Blocked` waits for a human.
 - Human feedback: each accepted Linear/Codex operator input creates a visible `[Human]` Todo issue.
   Loophony selects these tickets by Linear priority and age, creates a linked `[Work]` issue, and
-  runs only the Work issue. Ordinary feedback never disturbs current work. Explicit `preempt` stops
+  runs only the Work issue. A Human issue stays Todo until the Work issue and all marked downstream
+  handoff issues complete. Ordinary feedback never disturbs current work. Explicit `preempt` stops
   the current Codex turn and preserves its workspace before scheduling resumes. Routine scheduled
   review does not pause work. Genuine `Blocked` conditions and the SC-06 live-trading decision
   remain gated.
@@ -122,9 +124,15 @@ update the same record. `Done` and `Rejected` checkpoints are rejected unless th
 evidence.
 
 Cross-issue handoff is explicit rather than implicit: before finishing, the current loop writes the
-reusable evidence, artifact references, next falsification test, and acceptance checks into the
-next Linear Candidate. The next issue then starts a new, isolated loop and independently evaluates
-its alignment with the root goal.
+reusable evidence, artifact references, exact implementation scope, validation commands, next
+falsification test, and acceptance checks into the next Linear Candidate. Its description contains
+exactly one marker:
+`<!-- loophony-handoff:v1 source_issue_id=<ID> target_model=<MODEL> -->`. The scheduler accepts the
+new session only when the source ID differs from the successor, the source is terminal, and the
+model is allowed. At completion, it re-reads a distinct marked Todo successor that points back to
+the current issue and is named in the terminal checkpoint. Otherwise it restores the current issue
+to `In Progress`. The next issue starts a new, isolated Spark or Sol loop and independently
+evaluates its alignment with the root goal.
 
 The JSON status API and Codex App report expose the checkpoint count, outcome totals, and recent
 loop decisions. If the database is temporarily unavailable, the status report marks loop memory

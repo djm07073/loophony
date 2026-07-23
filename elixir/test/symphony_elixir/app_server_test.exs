@@ -33,6 +33,77 @@ defmodule SymphonyElixir.AppServerTest do
     assert get_in(decoded, ["params", "input", Access.at(0), "text"]) == "prefix � suffix"
   end
 
+  test "app server selects the requested top-level model on thread start" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-model-route-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-MODEL")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-model-route.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn -> restore_env("SYMP_TEST_CODEx_TRACE", previous_trace) end)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$SYMP_TEST_CODEx_TRACE"
+        case "$count" in
+          1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+          2) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-model"}}}' ;;
+          3) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-model"}}}' ;;
+          4) printf '%s\\n' '{"method":"turn/completed"}'; exit 0 ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-model-route",
+        identifier: "MT-MODEL",
+        title: "Route model",
+        state: "In Progress"
+      }
+
+      assert {:ok, session} =
+               AppServer.run(
+                 workspace,
+                 "Use Spark",
+                 issue,
+                 model: "gpt-5.3-codex-spark"
+               )
+
+      assert session.model == "gpt-5.3-codex-spark"
+
+      assert trace_file
+             |> File.read!()
+             |> String.split("\n", trim: true)
+             |> Enum.any?(fn line ->
+               payload = line |> String.trim_leading("JSON:") |> Jason.decode!()
+
+               payload["method"] == "thread/start" and
+                 get_in(payload, ["params", "model"]) == "gpt-5.3-codex-spark"
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(

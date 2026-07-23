@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
           thread_id: String.t(),
+          model: String.t() | nil,
           workspace: Path.t(),
           worker_host: String.t() | nil
         }
@@ -43,13 +44,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    model = Keyword.get(opts, :model)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies, model) do
         {:ok,
          %{
            port: port,
@@ -59,6 +61,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
+           model: model,
            workspace: expanded_workspace,
            worker_host: worker_host
          }}
@@ -79,6 +82,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           auto_approve_requests: auto_approve_requests,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
+          model: model,
           workspace: workspace
         },
         prompt,
@@ -111,7 +115,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           %{
             session_id: session_id,
             thread_id: thread_id,
-            turn_id: turn_id
+            turn_id: turn_id,
+            model: model
           },
           metadata
         )
@@ -132,7 +137,8 @@ defmodule SymphonyElixir.Codex.AppServer do
                result: result,
                session_id: session_id,
                thread_id: thread_id,
-               turn_id: turn_id
+               turn_id: turn_id,
+               model: model
              }}
 
           {:error, {:turn_preempted, request_id} = reason} ->
@@ -294,23 +300,32 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies) do
+  defp do_start_session(port, workspace, session_policies, model) do
     case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies)
+      :ok -> start_thread(port, workspace, session_policies, model)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
-    send_message(port, %{
-      "method" => "thread/start",
-      "id" => @thread_start_id,
-      "params" => %{
+  defp start_thread(
+         port,
+         workspace,
+         %{approval_policy: approval_policy, thread_sandbox: thread_sandbox},
+         model
+       ) do
+    params =
+      %{
         "approvalPolicy" => approval_policy,
         "sandbox" => thread_sandbox,
         "cwd" => workspace,
         "dynamicTools" => DynamicTool.tool_specs()
       }
+      |> maybe_put_model(model)
+
+    send_message(port, %{
+      "method" => "thread/start",
+      "id" => @thread_start_id,
+      "params" => params
     })
 
     case await_response(port, @thread_start_id) do
@@ -324,6 +339,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         other
     end
   end
+
+  defp maybe_put_model(params, model) when is_binary(model) and model != "",
+    do: Map.put(params, "model", model)
+
+  defp maybe_put_model(params, _model), do: params
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
     send_message(port, %{

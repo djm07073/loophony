@@ -34,6 +34,13 @@ intake:
   todo_state: Todo
   completed_state: Done
   max_claims_per_poll: 1
+handoff:
+  enabled: true
+  planner_model: gpt-5.6-sol
+  default_execution_model: gpt-5.3-codex-spark
+  allowed_models:
+    - gpt-5.6-sol
+    - gpt-5.3-codex-spark
 budget:
   enabled: true
   max_tokens_per_issue: 5000000
@@ -85,7 +92,7 @@ agent:
   max_turns: 6
   max_retry_backoff_ms: 300000
 codex:
-  command: /Applications/Codex.app/Contents/Resources/codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.6-sol"' --config model_reasoning_effort=medium --config 'agents.default_subagent_model="gpt-5.3-codex-spark"' --config agents.default_subagent_reasoning_effort=high app-server
+  command: /Applications/Codex.app/Contents/Resources/codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.6-sol"' --config model_reasoning_effort=medium app-server
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
@@ -218,15 +225,25 @@ No description was provided.
   Codex turn for each sampling slot. Wait on that job's `job_complete` condition with a deadline just
   after the frozen window; wake early only when the job exits or fails. The daemon monitors the job
   heartbeat without spending Codex tokens.
-- If the bounded issue requires source-code or test-file edits, delegate those edits to exactly one
-  coding subagent before editing them in the parent session. The subagent uses the configured
-  `gpt-5.3-codex-spark` default model and the shared issue workspace. Give it the bounded objective,
-  reproduction evidence, acceptance gates, file scope, and targeted tests; wait for it to implement
-  and validate, then inspect its complete diff and test evidence in the parent. The parent owns
-  research design, Linear/checkpoint updates, acceptance decisions, final validation, corrections,
-  publishing, and handoff. Do not spawn a coding subagent when no repository edit is required. If
-  spawning is unavailable or fails, record the fallback and implement in the parent; do not mark the
-  issue Blocked for that reason.
+- Obey the injected Loophony session role before repository edits:
+  - An unmarked issue is a `gpt-5.6-sol` planning/judgment session. Complete the research design,
+    reproduction, pre-registration, bounded implementation contract, and acceptance design first.
+    If new source-code or test-file edits are required, create or reuse one linked Todo execution
+    issue and do not implement that successor in this session.
+  - Put exactly one marker in the successor description:
+    `<!-- loophony-handoff:v1 source_issue_id=<CURRENT_LINEAR_ISSUE_ID> target_model=<MODEL> -->`.
+    Use `gpt-5.3-codex-spark` for unambiguous bounded implementation/tests. Use `gpt-5.6-sol` when
+    the next implementation session still requires architecture, complex correction, or material
+    judgment. Both are fresh top-level sessions, not subagents.
+  - Copy the full decision packet into the successor: source issue and root goal, mapped stage,
+    hypothesis/reproduction evidence, exact files and implementation scope, deterministic acceptance
+    checks, validation commands, artifact paths, risks, explicit non-goals, and the expected handback.
+  - A marked execution issue directly performs only that bounded implementation and verification on
+    its selected model. If a separate review, correction, or next coding cycle remains, create a new
+    Spark or Sol handoff issue; never execute the successor in this same session.
+  - A legacy active issue that already has uncommitted edits or an active durable wait when this
+    policy is introduced may finish that existing bounded cycle. Newly discovered coding cycles
+    must use the issue handoff contract.
 - For research, pre-register the hypothesis, universe, data window, signal/execution timing,
   benchmark, and pass/fail gates before inspecting results.
 - Prevent look-ahead, survivorship, target, and selection leakage. Record data source, retrieval
@@ -295,19 +312,27 @@ Before terminal completion, unless the root goal is fully proven or this issue i
    If another In Progress issue exists, leave all issues unchanged, record the conflict as
    `Blocked`, mention the reviewer, and do not create a replacement in this turn.
 3. If one or more adequate Todo issues already exist, reuse the highest-priority oldest matching
-   issue and update it only when necessary; do not create a duplicate.
+   issue and update it only when necessary; do not create a duplicate. Before reuse, make it an
+   explicit successor of this issue by adding or correcting the single `loophony-handoff:v1`
+   marker with this issue's immutable Linear ID and the selected target model.
 4. Otherwise create exactly one child issue in `Todo` with label `symphony-quant`, related to
    the current issue, and assigned to the same user as the current issue. Treat it as another
    queued Candidate. Never leave its assignee empty: copy the current assignee ID, or query `viewer` and
    use that ID when the current issue is unexpectedly unassigned. Include:
+   - exactly one machine marker
+     `<!-- loophony-handoff:v1 source_issue_id=<CURRENT_LINEAR_ISSUE_ID> target_model=<MODEL> -->`;
+   - `gpt-5.3-codex-spark` as the default for a fully specified bounded implementation/test packet,
+     or `gpt-5.6-sol` when the fresh successor still needs complex judgment;
    - root goal identifier and mapped success criterion;
    - the exact mapped `SC-XX` stage, which must equal the refreshed project `Active stage`;
    - evidence and artifact paths inherited from this run;
-   - one bounded objective and deterministic acceptance checks;
-   - the next falsification test and explicit non-goals.
+   - one bounded objective, exact file/implementation scope, deterministic acceptance checks, and
+     validation commands;
+   - the next falsification test, risks, expected handback, and explicit non-goals.
 5. Re-fetch the next issue and verify its `Todo` state, `symphony-quant` label, inherited assignee,
-   parent root, and single active-stage mapping. Do not claim or execute it. The next Symphony
-   session must independently repeat alignment.
+   parent root, single active-stage mapping, source issue ID, and allowed target model. Do not claim
+   or execute it. The next Symphony session must independently repeat alignment and receives the
+   issue in a fresh Spark or Sol top-level session.
    For a normal successor handoff, create or activate that Candidate and transition the current
    issue to `Done` in one GraphQL operation; never transition the current issue first. Loophony
    independently re-reads the eligible Candidate after the turn and restores the current issue to

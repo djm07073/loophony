@@ -184,6 +184,9 @@ defmodule SymphonyElixir.Orchestrator do
           running_entry
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
+          |> maybe_put_runtime_value(:model, runtime_info[:model])
+          |> maybe_put_runtime_value(:session_role, runtime_info[:session_role])
+          |> maybe_put_runtime_value(:source_issue_id, runtime_info[:source_issue_id])
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -1622,6 +1625,9 @@ defmodule SymphonyElixir.Orchestrator do
             issue: issue,
             worker_host: worker_host,
             workspace_path: nil,
+            model: nil,
+            session_role: nil,
+            source_issue_id: nil,
             session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
@@ -2106,6 +2112,9 @@ defmodule SymphonyElixir.Orchestrator do
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
+          model: Map.get(metadata, :model),
+          session_role: Map.get(metadata, :session_role),
+          source_issue_id: Map.get(metadata, :source_issue_id),
           session_id: metadata.session_id,
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,

@@ -111,6 +111,10 @@ defmodule SymphonyElixir.TestSupport do
           intake_todo_state: "Todo",
           intake_completed_state: "Done",
           intake_max_claims_per_poll: 1,
+          handoff_enabled: false,
+          handoff_planner_model: "gpt-5.6-sol",
+          handoff_default_execution_model: "gpt-5.3-codex-spark",
+          handoff_allowed_models: ["gpt-5.6-sol", "gpt-5.3-codex-spark"],
           memory_enabled: false,
           memory_onyx_api_url: "http://127.0.0.1:8780",
           memory_onyx_api_key: "onyx-test-key",
@@ -167,6 +171,10 @@ defmodule SymphonyElixir.TestSupport do
     intake_todo_state = Keyword.get(config, :intake_todo_state)
     intake_completed_state = Keyword.get(config, :intake_completed_state)
     intake_max_claims_per_poll = Keyword.get(config, :intake_max_claims_per_poll)
+    handoff_enabled = Keyword.get(config, :handoff_enabled)
+    handoff_planner_model = Keyword.get(config, :handoff_planner_model)
+    handoff_default_execution_model = Keyword.get(config, :handoff_default_execution_model)
+    handoff_allowed_models = Keyword.get(config, :handoff_allowed_models)
     memory_enabled = Keyword.get(config, :memory_enabled)
     memory_onyx_api_url = Keyword.get(config, :memory_onyx_api_url)
     memory_onyx_api_key = Keyword.get(config, :memory_onyx_api_key)
@@ -231,6 +239,11 @@ defmodule SymphonyElixir.TestSupport do
         "  todo_state: #{yaml_value(intake_todo_state)}",
         "  completed_state: #{yaml_value(intake_completed_state)}",
         "  max_claims_per_poll: #{yaml_value(intake_max_claims_per_poll)}",
+        "handoff:",
+        "  enabled: #{yaml_value(handoff_enabled)}",
+        "  planner_model: #{yaml_value(handoff_planner_model)}",
+        "  default_execution_model: #{yaml_value(handoff_default_execution_model)}",
+        "  allowed_models: #{yaml_value(handoff_allowed_models)}",
         "memory:",
         "  enabled: #{yaml_value(memory_enabled)}",
         "  onyx_api_url: #{yaml_value(memory_onyx_api_url)}",

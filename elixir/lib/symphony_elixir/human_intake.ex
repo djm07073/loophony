@@ -7,7 +7,7 @@ defmodule SymphonyElixir.HumanIntake do
   restarts and partially completed mutations without relying on hidden in-memory state.
   """
 
-  alias SymphonyElixir.{AuditLog, Config, GoalPolicy, Linear.Issue, Tracker}
+  alias SymphonyElixir.{AuditLog, Config, GoalPolicy, Handoff, Linear.Issue, Tracker}
 
   @human_marker "<!-- loophony-human-request:v1 -->"
   @work_marker_prefix "<!-- loophony-work-item:v1 human_issue_id="
@@ -109,7 +109,7 @@ defmodule SymphonyElixir.HumanIntake do
     issues
     |> Enum.filter(&(work_issue?(&1) and terminal_issue?(&1, settings)))
     |> Enum.reduce_while({:ok, []}, fn work_issue, {:ok, completed} ->
-      case sync_completed_human_issue(work_issue, human_by_id, tracker, settings) do
+      case sync_completed_human_issue(work_issue, human_by_id, issues, tracker, settings) do
         {:ok, payload} -> {:cont, {:ok, [payload | completed]}}
         :skip -> {:cont, {:ok, completed}}
         {:error, reason} -> {:halt, {:error, reason}}
@@ -118,10 +118,32 @@ defmodule SymphonyElixir.HumanIntake do
     |> reverse_result()
   end
 
-  defp sync_completed_human_issue(work_issue, human_by_id, tracker, settings) do
-    case Map.get(human_by_id, source_human_issue_id(work_issue)) do
-      %Issue{} = human_issue -> complete_human_issue(human_issue, work_issue, tracker, settings)
-      nil -> :skip
+  defp sync_completed_human_issue(work_issue, human_by_id, issues, tracker, settings) do
+    with %Issue{} = human_issue <- Map.get(human_by_id, source_human_issue_id(work_issue)),
+         true <- handoff_chain_complete?(work_issue.id, issues, settings) do
+      complete_human_issue(human_issue, work_issue, tracker, settings)
+    else
+      _ -> :skip
+    end
+  end
+
+  @spec handoff_chain_complete?(String.t(), [Issue.t()], map(), [String.t()]) :: boolean()
+  defp handoff_chain_complete?(source_issue_id, issues, settings, visited \\ [])
+
+  defp handoff_chain_complete?(source_issue_id, issues, settings, visited)
+       when is_binary(source_issue_id) and is_list(issues) do
+    if source_issue_id in visited do
+      false
+    else
+      children = Enum.filter(issues, &Handoff.successor_of?(&1, source_issue_id))
+      visited = [source_issue_id | visited]
+
+      children == [] or
+        Enum.all?(children, fn child ->
+          terminal_issue?(child, settings) and
+            is_binary(child.id) and
+            handoff_chain_complete?(child.id, issues, settings, visited)
+        end)
     end
   end
 

@@ -217,6 +217,51 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Handoff do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:planner_model, :string, default: "gpt-5.6-sol")
+      field(:default_execution_model, :string, default: "gpt-5.3-codex-spark")
+      field(:allowed_models, {:array, :string}, default: ["gpt-5.6-sol", "gpt-5.3-codex-spark"])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [:enabled, :planner_model, :default_execution_model, :allowed_models],
+        empty_values: []
+      )
+      |> validate_required([:planner_model, :default_execution_model, :allowed_models])
+      |> update_change(:allowed_models, fn models ->
+        models
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+      end)
+      |> validate_length(:allowed_models, min: 1)
+      |> validate_model_membership()
+    end
+
+    defp validate_model_membership(changeset) do
+      if get_field(changeset, :enabled) do
+        allowed_models = get_field(changeset, :allowed_models, [])
+
+        changeset
+        |> validate_inclusion(:planner_model, allowed_models)
+        |> validate_inclusion(:default_execution_model, allowed_models)
+      else
+        changeset
+      end
+    end
+  end
+
   defmodule Budget do
     @moduledoc false
     use Ecto.Schema
@@ -537,6 +582,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:audit, Audit, on_replace: :update, defaults_to_struct: true)
     embeds_one(:automation, Automation, on_replace: :update, defaults_to_struct: true)
     embeds_one(:intake, Intake, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:handoff, Handoff, on_replace: :update, defaults_to_struct: true)
     embeds_one(:budget, Budget, on_replace: :update, defaults_to_struct: true)
     embeds_one(:goal_policy, GoalPolicy, on_replace: :update, defaults_to_struct: true)
     embeds_one(:memory, Memory, on_replace: :update, defaults_to_struct: true)
@@ -637,6 +683,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:audit, with: &Audit.changeset/2)
     |> cast_embed(:automation, with: &Automation.changeset/2)
     |> cast_embed(:intake, with: &Intake.changeset/2)
+    |> cast_embed(:handoff, with: &Handoff.changeset/2)
     |> cast_embed(:budget, with: &Budget.changeset/2)
     |> cast_embed(:goal_policy, with: &GoalPolicy.changeset/2)
     |> cast_embed(:memory, with: &Memory.changeset/2)

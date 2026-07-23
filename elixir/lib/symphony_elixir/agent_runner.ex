@@ -5,7 +5,19 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.{AppServer, DynamicTool}
-  alias SymphonyElixir.{Config, Linear.Issue, LoopStore, MemoryStore, PromptBuilder, RuntimeStore, Tracker, Workspace}
+
+  alias SymphonyElixir.{
+    AuditLog,
+    Config,
+    Handoff,
+    Linear.Issue,
+    LoopStore,
+    MemoryStore,
+    PromptBuilder,
+    RuntimeStore,
+    Tracker,
+    Workspace
+  }
 
   @type worker_host :: String.t() | nil
 
@@ -47,20 +59,24 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
-      {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+    with {:ok, route} <- Handoff.route(issue),
+         :ok <-
+           Handoff.verify_session_start(
+             issue,
+             route,
+             source_issue_fetcher: Keyword.get(opts, :source_issue_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+           ),
+         {:ok, workspace} <- Workspace.create_for_issue(issue, worker_host) do
+      send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace, route)
+      audit_session_route(issue, route)
 
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
-          end
-        after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
+      try do
+        with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+          run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route)
         end
-
-      {:error, reason} ->
-        {:error, reason}
+      after
+        Workspace.run_after_run_hook(workspace, issue, worker_host)
+      end
     end
   end
 
@@ -79,23 +95,26 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_codex_update(_recipient, _issue, _message), do: :ok
 
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
+  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace, route)
        when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
     send(
       recipient,
       {:worker_runtime_info, issue_id,
        %{
          worker_host: worker_host,
-         workspace_path: workspace
+         workspace_path: workspace,
+         model: route.model,
+         session_role: route.role,
+         source_issue_id: route.source_issue_id
        }}
     )
 
     :ok
   end
 
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace, _route), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -104,18 +123,20 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       :ok ->
-        with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+        with {:ok, session} <-
+               AppServer.start_session(workspace, worker_host: worker_host, model: route.model) do
+          context = %{
+            app_session: session,
+            workspace: workspace,
+            codex_update_recipient: codex_update_recipient,
+            opts: opts,
+            issue_state_fetcher: issue_state_fetcher,
+            max_turns: max_turns,
+            route: route
+          }
+
           try do
-            do_run_codex_turns(
-              session,
-              workspace,
-              issue,
-              codex_update_recipient,
-              opts,
-              issue_state_fetcher,
-              1,
-              max_turns
-            )
+            do_run_codex_turns(context, issue, 1)
           after
             AppServer.stop_session(session)
           end
@@ -123,8 +144,14 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+  defp do_run_codex_turns(context, issue, turn_number) do
+    app_session = context.app_session
+    workspace = context.workspace
+    codex_update_recipient = context.codex_update_recipient
+    opts = context.opts
+    max_turns = context.max_turns
+    route = context.route
+    prompt = build_turn_prompt(issue, opts, turn_number, max_turns, route)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments, session_context ->
@@ -149,16 +176,7 @@ defmodule SymphonyElixir.AgentRunner do
           Logger.info("Stopping at the scheduled human goal-review gate after a safe Codex turn for #{issue_context(issue)}")
           :ok
         else
-          continue_after_turn(
-            app_session,
-            workspace,
-            issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number,
-            max_turns
-          )
+          continue_after_turn(context, issue, turn_number)
         end
 
       {:error, {:turn_preempted, request_id}} ->
@@ -171,77 +189,32 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp continue_after_turn(
-         app_session,
-         workspace,
-         issue,
-         codex_update_recipient,
-         opts,
-         issue_state_fetcher,
-         turn_number,
-         max_turns
-       ) do
+  defp continue_after_turn(context, issue, turn_number) do
     if active_automated_wait?(issue.id) do
       Logger.info("Stopping Codex turns for #{issue_context(issue)} because a durable automated wait is active")
       :ok
     else
-      continue_after_turn_without_wait(
-        app_session,
-        workspace,
-        issue,
-        codex_update_recipient,
-        opts,
-        issue_state_fetcher,
-        turn_number,
-        max_turns
-      )
+      continue_after_turn_without_wait(context, issue, turn_number)
     end
   end
 
-  defp continue_after_turn_without_wait(
-         app_session,
-         workspace,
-         issue,
-         codex_update_recipient,
-         opts,
-         issue_state_fetcher,
-         turn_number,
-         max_turns
-       ) do
-    case continue_with_issue?(issue, issue_state_fetcher) do
-      {:continue, refreshed_issue} when turn_number < max_turns ->
-        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+  defp continue_after_turn_without_wait(context, issue, turn_number) do
+    case continue_with_issue?(issue, context.issue_state_fetcher) do
+      {:continue, refreshed_issue} when turn_number < context.max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{context.max_turns}")
 
-        do_run_codex_turns(
-          app_session,
-          workspace,
-          refreshed_issue,
-          codex_update_recipient,
-          opts,
-          issue_state_fetcher,
-          turn_number + 1,
-          max_turns
-        )
+        do_run_codex_turns(context, refreshed_issue, turn_number + 1)
 
       {:continue, refreshed_issue} ->
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
 
-        maybe_report_repeated_blocker(issue, codex_update_recipient, opts)
+        maybe_report_repeated_blocker(issue, context.codex_update_recipient, context.opts)
 
         :ok
 
       {:done, refreshed_issue} ->
         if completion_state?(refreshed_issue.state) do
-          guard_terminal_handoff(refreshed_issue, %{
-            app_session: app_session,
-            workspace: workspace,
-            issue: issue,
-            codex_update_recipient: codex_update_recipient,
-            opts: opts,
-            issue_state_fetcher: issue_state_fetcher,
-            turn_number: turn_number,
-            max_turns: max_turns
-          })
+          guard_terminal_handoff(refreshed_issue, Map.merge(context, %{issue: issue, turn_number: turn_number}))
         else
           :ok
         end
@@ -251,16 +224,17 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns) do
+  defp build_turn_prompt(issue, opts, 1, _max_turns, route) do
     prompt = PromptBuilder.build_prompt(issue, opts)
 
     prompt
+    |> append_context(Handoff.prompt_context(issue, route))
     |> append_context(LoopStore.review_context())
     |> append_context(LoopStore.prompt_context(issue))
     |> append_context(runtime_prompt_context(issue.id))
   end
 
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
+  defp build_turn_prompt(_issue, _opts, turn_number, max_turns, _route) do
     """
     Continuation guidance:
 
@@ -372,16 +346,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp continue_restored_issue(restored_issue, %{turn_number: turn_number, max_turns: max_turns} = context)
        when turn_number < max_turns do
-    do_run_codex_turns(
-      context.app_session,
-      context.workspace,
-      restored_issue,
-      context.codex_update_recipient,
-      context.opts,
-      context.issue_state_fetcher,
-      turn_number + 1,
-      max_turns
-    )
+    do_run_codex_turns(context, restored_issue, turn_number + 1)
   end
 
   defp continue_restored_issue(_restored_issue, _context),
@@ -395,11 +360,10 @@ defmodule SymphonyElixir.AgentRunner do
           Map.get(checkpoint, :outcome) in ["done", "rejected"]
       end)
 
-    successor_exists =
-      Enum.any?(candidates, fn
-        %Issue{id: candidate_id} -> is_binary(candidate_id) and candidate_id != issue_id
-        _ -> false
-      end)
+    successor = verified_successor(issue_id, candidates)
+
+    successor_verified? =
+      not is_nil(successor) and terminal_checkpoint_names_successor?(latest_terminal_handoff, successor)
 
     explicit_termination =
       case latest_terminal_handoff do
@@ -410,10 +374,49 @@ defmodule SymphonyElixir.AgentRunner do
           false
       end
 
-    not is_nil(latest_terminal_handoff) and (successor_exists or explicit_termination)
+    not is_nil(latest_terminal_handoff) and (successor_verified? or explicit_termination)
   end
 
   defp terminal_handoff_ready?(_issue, _candidates, _checkpoints), do: false
+
+  defp verified_successor(issue_id, candidates) do
+    handoff_enabled? = Config.settings!().handoff.enabled
+
+    Enum.find(candidates, fn
+      %Issue{id: candidate_id} = candidate when is_binary(candidate_id) and candidate_id != issue_id ->
+        not handoff_enabled? or
+          (todo_issue?(candidate) and valid_handoff_successor?(candidate, issue_id))
+
+      _ ->
+        false
+    end)
+  end
+
+  defp valid_handoff_successor?(candidate, issue_id) do
+    Handoff.successor_of?(candidate, issue_id) and match?({:ok, %{role: :executor}}, Handoff.route(candidate))
+  end
+
+  defp terminal_checkpoint_names_successor?(checkpoint, successor) do
+    if Config.settings!().handoff.enabled do
+      case {checkpoint, successor} do
+        {%{next_action: next_action}, %Issue{id: issue_id, identifier: identifier}}
+        when is_binary(next_action) ->
+          (is_binary(issue_id) and String.contains?(next_action, issue_id)) or
+            (is_binary(identifier) and String.contains?(next_action, identifier))
+
+        _ ->
+          false
+      end
+    else
+      true
+    end
+  end
+
+  defp todo_issue?(%Issue{state: state}) when is_binary(state) do
+    normalize_issue_state(state) == "todo"
+  end
+
+  defp todo_issue?(_issue), do: false
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
@@ -452,6 +455,23 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
+
+  defp audit_session_route(issue, route) do
+    _ =
+      AuditLog.record_async("codex.session_routed", %{
+        actor: "agent_runner",
+        resource_type: "linear_issue",
+        resource_id: issue.id,
+        metadata: %{
+          issue_identifier: issue.identifier,
+          model: route.model,
+          session_role: route.role,
+          source_issue_id: route.source_issue_id
+        }
+      })
+
+    :ok
+  end
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     state_name

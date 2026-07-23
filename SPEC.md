@@ -513,14 +513,50 @@ stable source-Human issue marker, retain the Human issue priority and tracker ro
 leave the Human request in `todo_state` while its Work issue is open. The implementation SHOULD
 create a native tracker relation between both issues; the description marker remains the recovery
 and idempotency source of truth.
-A terminal Work issue MUST move its source Human issue to `completed_state`.
+A terminal Work issue MUST move its source Human issue to `completed_state` only after every
+descendant issue connected by a valid handoff marker is also terminal. An open descendant keeps the
+Human source in `todo_state`.
 An intake-enabled `preempt` MUST move the interrupted source issue to `todo_state` before normal
 dispatch resumes so the single-In-Progress invariant leaves room for the new Work issue. When the
 operator omits a Linear priority, a preempt request defaults to urgent priority (`1`). New Human
 and Work issues SHOULD inherit the source issue's explicit `Mapped stage`, or the project's active
 stage when the source has no explicit mapping.
 
-#### 5.3.10 `budget` (object, OPTIONAL extension)
+#### 5.3.10 `handoff` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `false`
+- `planner_model` (non-empty model ID), default `gpt-5.6-sol`
+- `default_execution_model` (non-empty model ID), default `gpt-5.3-codex-spark`
+- `allowed_models` (non-empty unique model ID list), default
+  `["gpt-5.6-sol", "gpt-5.3-codex-spark"]`
+
+When enabled, an issue without a handoff marker MUST start a top-level session using
+`planner_model`. A successor execution issue MUST contain exactly one marker:
+
+```text
+<!-- loophony-handoff:v1 source_issue_id=<IMMUTABLE_ISSUE_ID> target_model=<MODEL> -->
+```
+
+The target model MUST belong to `allowed_models`. The successor ID MUST differ from the source ID.
+Before starting the successor session, the scheduler MUST re-read the source issue and verify that
+it is terminal. It MUST then pass the target model in the app-server thread-start request. A missing
+source, nonterminal source, self-reference, duplicate marker, or disallowed model MUST fail closed
+before workspace execution.
+
+Before terminal completion, the scheduler MUST re-read a distinct Todo successor whose single
+marker points to the current immutable issue ID and names an allowed model. The terminal
+`learn`/`handoff` checkpoint MUST name that successor by identifier or immutable ID. If any proof is
+missing, the scheduler MUST restore the current issue to `In Progress`. A successor-free terminal
+transition is allowed only when the checkpoint contains
+`termination_reason=<bounded root-goal reason>`.
+
+An implementation MAY reuse an existing Todo issue instead of creating a duplicate, but it MUST
+update that issue with the current source marker and full execution contract before treating it as
+the successor. The source session MUST NOT execute its successor.
+
+#### 5.3.11 `budget` (object, OPTIONAL extension)
 
 Fields:
 
@@ -537,7 +573,7 @@ one-time tracker warning and audit event without stopping the active worker. `bl
 explicit fail-closed option. When `on_exhausted=wait`, a daily-token-only exhaustion MAY register a
 durable wait until the next UTC day; non-renewing issue limits still block.
 
-#### 5.3.11 `goal_policy` (object, OPTIONAL extension)
+#### 5.3.12 `goal_policy` (object, OPTIONAL extension)
 
 Fields:
 
@@ -552,7 +588,7 @@ maps to the single active `SC-XX` stage. Multiple aligned `Todo` issues are vali
 issue is `In Progress`, it is the only dispatch-eligible issue; Todo work remains queued. Review
 status SHOULD expose whether its recorded goal version is stale.
 
-#### 5.3.12 `hooks` (object)
+#### 5.3.13 `hooks` (object)
 
 Fields:
 
@@ -576,7 +612,7 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.13 `agent` (object)
+#### 5.3.14 `agent` (object)
 
 Fields:
 
@@ -599,7 +635,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.14 `codex` (object)
+#### 5.3.15 `codex` (object)
 
 Fields:
 
@@ -615,15 +651,14 @@ fields locally if they want stricter startup checks.
   - Default: `codex app-server`
   - The runtime launches this command via `bash -lc` in the workspace directory.
   - The launched process MUST speak a compatible app-server protocol over stdio.
-  - Bundled Loophony workflows pin the top-level planning and acceptance session to
-    `gpt-5.6-sol` at `medium` reasoning and the default subagent to
-    `gpt-5.3-codex-spark` at `medium` reasoning.
-  - When source-code or test-file edits are required, those workflows delegate one bounded
-    implementation to one Spark subagent in the shared issue workspace. The parent session MUST
-    retain ownership of the plan, tracker/checkpoint writes, complete-diff review, required
-    validation, completion decision, publishing, and handoff.
-  - Work that does not require repository edits MUST NOT create the coding subagent. A subagent
-    startup failure falls back to parent implementation and is not an external blocker.
+  - Bundled Loophony workflows use `gpt-5.6-sol` at `medium` reasoning for unmarked planning and
+    judgment issues.
+  - When source-code or test-file edits are required, the planning session MUST create or reuse a
+    marked Todo successor with a complete execution packet. Bounded implementation/tests normally
+    target a fresh top-level `gpt-5.3-codex-spark` session. Work that still needs complex judgment
+    targets a fresh top-level `gpt-5.6-sol` session.
+  - Session routing uses the targeted app-server's per-thread model field. It does not rely on a
+    Spark subagent override.
 - `approval_policy` (Codex `AskForApproval` value)
   - Default: implementation-defined.
 - `thread_sandbox` (Codex `SandboxMode` value)
@@ -1218,6 +1253,9 @@ client to:
 - Start the app-server subprocess in the per-issue workspace.
 - Initialize the app-server session using the targeted Codex app-server protocol.
 - Create or resume a coding-agent thread according to the targeted protocol.
+- When handoff routing is enabled, resolve the current issue's planner/executor role before
+  workspace execution, verify executor source-terminal invariants, and supply the selected
+  top-level model in the thread-start request.
 - Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
   targeted protocol accepts cwd.
 - Start the first turn with the rendered issue prompt.
@@ -1228,6 +1266,8 @@ client to:
 - Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the targeted
   protocol supports turn or session titles.
 - Advertise implemented client-side tools using the targeted protocol.
+- Emit the selected model, session role, and source issue ID in runtime status and append a
+  secret-redacted `codex.session_routed` audit event.
 
 Session identifiers:
 
@@ -2177,6 +2217,13 @@ function dispatch_issue(issue, state, attempt):
 
 ```text
 function run_agent_attempt(issue, attempt, orchestrator_channel):
+  route = handoff.resolve_route(issue)
+  if route failed:
+    fail_worker("handoff route error")
+
+  if handoff.verify_session_start(issue, route, tracker) failed:
+    fail_worker("handoff source invariant error")
+
   workspace = workspace_manager.create_for_issue(issue.identifier)
   if workspace failed:
     fail_worker("workspace error")
@@ -2184,7 +2231,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = app_server.start_session(workspace=workspace.path)
+  session = app_server.start_session(workspace=workspace.path, model=route.model)
   if session failed:
     run_hook_best_effort("after_run", workspace.path)
     fail_worker("agent session startup error")

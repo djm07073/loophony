@@ -17,8 +17,16 @@ and OpenSearch 3.6 hybrid search let Codex answer natural-language questions acr
   only discovers externally created work and reconciles missed state changes.
 - Exactly one top-level Codex worker session and one internal pending dispatch slot are allowed
   globally. Linear may contain multiple aligned `Todo` issues, but only one executable issue may
-  be `In Progress`. A worker may still use subsessions or subagents inside that single top-level
-  session.
+  be `In Progress`.
+- Unmarked issues start as `gpt-5.6-sol` planning and judgment sessions. When implementation is
+  required, that session creates or reuses a linked Todo successor containing a durable
+  `loophony-handoff:v1` marker and a complete execution packet. The successor starts in a fresh
+  top-level session on either `gpt-5.3-codex-spark` for bounded coding/tests or `gpt-5.6-sol` when
+  complex judgment remains. The source session never executes its successor.
+- Session-boundary invariants fail closed: an execution issue must have exactly one marker, a
+  different terminal source issue, and an allowed model. A source issue cannot finish unless a
+  distinct marked Todo successor is re-read from Linear and named by the terminal checkpoint, or
+  the checkpoint contains an explicit root-goal termination reason.
 - Issues with verified evidence may move directly to `Done`; they do not accumulate in human
   review.
 - A valid negative result is also `Done` with a durable `rejected` evidence outcome. Workers never
@@ -299,27 +307,31 @@ Loophony then turns the contract into bounded work, one issue at a time:
    negative result may finish that issue as `Rejected`; it is not treated as an agent failure.
 5. The user may inspect Linear at any time and submit feedback. Every accepted request becomes a
    `[Human]` Todo issue, so the user can see exactly which ticket Loophony will handle. Loophony
-   claims the highest-priority oldest Human issue and creates a linked `[Work]` issue for execution.
-   Ordinary feedback stays queued without disturbing active work. Only an explicit preemption
-   interrupts the active Codex turn and preserves its workspace before scheduling resumes.
+   claims the highest-priority oldest Human issue and creates a linked `[Work]` issue. Sol turns
+   that request into a durable execution handoff when coding is required; the Human source remains
+   Todo until the complete downstream handoff chain finishes. Ordinary feedback stays queued
+   without disturbing active work. Only an explicit preemption interrupts the active Codex turn
+   and preserves its workspace before scheduling resumes.
 
 ```mermaid
 flowchart TD
     A["Linear project goal contract"] --> B["Reconcile Todo Human issues by priority and age"]
     B --> C["Create or recover linked Work issue"]
     C --> D["Select one aligned Candidate / Ready Work issue"]
-    D --> E["Fresh Codex session"]
-    E --> F["Read project, Work issue, linked Human request, repo, and checkpoints"]
-    F --> G["Execute and verify one bounded increment"]
-    G --> H{"Outcome"}
-    H -->|"Done / Rejected"| I["Persist evidence and complete the source Human issue"]
-    H -->|"Retry"| J["End turn; retry policy schedules another attempt"]
-    H -->|"Blocked"| K["Pause and request human input"]
-    G -->|"Explicit preempt"| L["Interrupt turn and preserve workspace"]
-    I --> M["Immediately poll for the next single issue"]
-    K --> N["Mention reviewer and wait for explicit unblock input"]
-    L --> B
-    M --> B
+    D --> E["Fresh Sol planning / judgment session"]
+    E --> F["Read project, issue, linked Human request, repo, and checkpoints"]
+    F --> G["Create or reuse marked Todo successor"]
+    G --> H["Fresh Spark or Sol execution session"]
+    H --> I["Implement and verify one bounded increment"]
+    I --> J{"Outcome"}
+    J -->|"Done / Rejected"| K["Persist evidence and complete the handoff chain"]
+    J -->|"Retry"| L["End turn; retry policy schedules another attempt"]
+    J -->|"Blocked"| M["Pause and request human input"]
+    I -->|"Explicit preempt"| N["Interrupt turn and preserve workspace"]
+    K --> O["Immediately poll for the next single issue"]
+    M --> P["Mention reviewer and wait for explicit unblock input"]
+    N --> B
+    O --> B
 ```
 
 ## How a fresh session recovers context

@@ -217,6 +217,39 @@ defmodule SymphonyElixir.HumanIntakeTest do
     refute_received {:create_intake_issue, _attributes}
   end
 
+  test "source Human issue stays Todo while a downstream handoff issue is open" do
+    human = human_issue("human-1", "LOOP-10", 2, DateTime.utc_now())
+    work = work_issue("work-1", "LOOP-11", human.id, "Done")
+    execution = handoff_issue("execution-1", "LOOP-12", work.id, "Todo")
+    Process.put(:intake_issues_result, {:ok, [human, work, execution]})
+
+    assert {:ok, %{completed: []}} =
+             HumanIntake.reconcile(
+               tracker: TestTracker,
+               settings: intake_settings(),
+               state_names: ["Todo", "In Progress", "Done"]
+             )
+
+    refute_received {:update_intake_state, "human-1", "Done"}
+  end
+
+  test "source Human issue completes after the entire handoff chain completes" do
+    human = human_issue("human-1", "LOOP-10", 2, DateTime.utc_now())
+    work = work_issue("work-1", "LOOP-11", human.id, "Done")
+    execution = handoff_issue("execution-1", "LOOP-12", work.id, "Done")
+    verification = handoff_issue("verification-1", "LOOP-13", execution.id, "Done")
+    Process.put(:intake_issues_result, {:ok, [human, work, execution, verification]})
+
+    assert {:ok, %{completed: [%{human_issue_id: "human-1"}]}} =
+             HumanIntake.reconcile(
+               tracker: TestTracker,
+               settings: intake_settings(),
+               state_names: ["Todo", "In Progress", "Done"]
+             )
+
+    assert_receive {:update_intake_state, "human-1", "Done"}
+  end
+
   defp human_issue(id, identifier, priority, created_at) do
     %Issue{
       id: id,
@@ -237,6 +270,18 @@ defmodule SymphonyElixir.HumanIntakeTest do
       identifier: identifier,
       title: "[Work] linked request",
       description: "<!-- loophony-work-item:v1 human_issue_id=#{human_issue_id} -->\n<!-- loophony-human-request:v1 -->\n요청",
+      state: state,
+      url: "https://example.org/#{identifier}",
+      labels: []
+    }
+  end
+
+  defp handoff_issue(id, identifier, source_issue_id, state) do
+    %Issue{
+      id: id,
+      identifier: identifier,
+      title: "[Execute] linked handoff",
+      description: "<!-- loophony-handoff:v1 source_issue_id=#{source_issue_id} target_model=gpt-5.3-codex-spark -->",
       state: state,
       url: "https://example.org/#{identifier}",
       labels: []

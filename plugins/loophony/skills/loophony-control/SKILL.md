@@ -47,7 +47,9 @@ Call `loophony_submit_operator_input` only with user-supplied or user-approved t
   concise ticket title and `priority` when they explicitly set Linear priority (`1` urgent through
   `4` low; `0` means no priority). Loophony claims Todo Human issues by priority and age, creates a
   linked `[Work]` issue, and runs only the Work issue. The Human request remains Todo until its Work
-  issue completes. Multiple Todo issues may wait, but only one executable issue may be In Progress.
+  issue and every marked downstream handoff issue complete. Sol planning sessions may hand bounded
+  coding/tests to a fresh Spark session or complex work to a fresh Sol session. Multiple Todo issues
+  may wait, but only one executable issue may be In Progress.
 - `instruction`: enqueue a bounded Human request without interrupting current work.
 - `goal_adjustment`: enqueue renewed alignment with the project and root goal.
 - `preempt`: only when the user explicitly says to stop, replace, restart, or reprioritize current
