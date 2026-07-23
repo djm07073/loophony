@@ -246,16 +246,17 @@ Use this only when completion is blocked by missing required tools or missing au
     - Edit it liberally whenever reality changes (scope, risks, validation approach, discovered tasks).
 4.  Obey the injected Loophony session role before editing:
     - An unmarked issue is a `gpt-5.6-sol` planning/judgment session. Reproduce the problem, decide
-      the bounded implementation and validation contract, then create or reuse one linked Todo
-      execution issue. Do not make the successor's source/test edits in this session.
+      the bounded implementation and validation contract, then create one new linked Todo execution
+      issue during this session. Never repurpose an older Todo issue. Do not make the successor's
+      source/test edits in this session.
     - Put exactly one marker in the successor description:
       `<!-- loophony-handoff:v1 source_issue_id=<CURRENT_LINEAR_ISSUE_ID> target_model=<MODEL> -->`.
       Use `gpt-5.3-codex-spark` for clear, bounded coding and tests. Use `gpt-5.6-sol` when the
       implementation still requires architecture, ambiguity resolution, or high-risk judgment.
     - Copy reproduction evidence, file scope, implementation steps, deterministic acceptance
       checks, validation commands, risks, and non-goals into the successor. Link it to this issue,
-      keep it Todo, record a terminal handoff checkpoint, and finish this issue without executing
-      the successor.
+      keep it Todo, re-fetch its `createdAt` and verify it is not earlier than this session start,
+      record a terminal handoff checkpoint, and finish this issue without executing the successor.
     - A marked execution issue runs as a fresh top-level session on its selected model and performs
       its own bounded implementation and tests. It may create another Spark or Sol handoff issue
       when a distinct cycle remains, but it never executes that successor in the same session.

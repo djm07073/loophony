@@ -12,7 +12,7 @@ quant-research worker. The former TypeScript goal loop is not part of this execu
   work is separate and at most one executable issue may be In Progress.
 - Concurrency: one.
 - Model routing: every unmarked issue starts as a `gpt-5.6-sol` medium planning/judgment session.
-  When coding is required, Sol creates or reuses a linked Todo issue containing one durable
+  When coding is required, Sol creates a new linked Todo issue during the current session containing one durable
   `loophony-handoff:v1` marker and the complete implementation/test contract. That issue starts a
   fresh top-level `gpt-5.3-codex-spark` session for bounded work, or another `gpt-5.6-sol` session
   when material architectural or risk judgment remains.
@@ -165,5 +165,5 @@ Create one `Candidate` child under the root goal, apply `symphony-quant`, and in
 - deterministic acceptance checks;
 - expected artifact paths and explicit non-goals.
 
-Every completed worker either reuses or creates the next Candidate. The next session always repeats
-project/root alignment before execution.
+Every completed worker creates a new next Candidate during its current session. The next session
+always repeats project/root alignment before execution.

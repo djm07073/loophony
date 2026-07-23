@@ -788,6 +788,8 @@ defmodule SymphonyElixir.CoreTest do
   test "enabled handoff requires a successor marker tied to the source and permits Spark or Sol" do
     write_workflow_file!(Workflow.workflow_file_path(), handoff_enabled: true)
 
+    session_started_at = ~U[2026-07-23 05:00:00Z]
+    successor_created_at = ~U[2026-07-23 05:00:01Z]
     current = %Issue{id: "current", identifier: "MT-605", state: "Done"}
     handoff = %{phase: "handoff", outcome: "done", next_action: "next_candidate=MT-606"}
     unmarked = %Issue{id: "unmarked", identifier: "MT-606", state: "Todo"}
@@ -799,31 +801,74 @@ defmodule SymphonyElixir.CoreTest do
       description: "<!-- loophony-handoff:v1 source_issue_id=other target_model=gpt-5.3-codex-spark -->"
     }
 
-    refute AgentRunner.terminal_handoff_ready_for_test(current, [unmarked], [handoff])
-    refute AgentRunner.terminal_handoff_ready_for_test(current, [wrong_source], [handoff])
+    refute AgentRunner.terminal_handoff_ready_for_test(
+             current,
+             [unmarked],
+             [handoff],
+             session_started_at
+           )
+
+    refute AgentRunner.terminal_handoff_ready_for_test(
+             current,
+             [wrong_source],
+             [handoff],
+             session_started_at
+           )
 
     for model <- ["gpt-5.3-codex-spark", "gpt-5.6-sol"] do
       successor = %Issue{
         id: "successor-#{model}",
         identifier: "MT-606",
         state: "Todo",
+        created_at: successor_created_at,
         description: "<!-- loophony-handoff:v1 source_issue_id=current target_model=#{model} -->"
       }
 
-      assert AgentRunner.terminal_handoff_ready_for_test(current, [successor], [handoff])
+      assert AgentRunner.terminal_handoff_ready_for_test(
+               current,
+               [successor],
+               [handoff],
+               session_started_at
+             )
     end
 
     in_progress_successor = %Issue{
       id: "successor-in-progress",
       identifier: "MT-606",
       state: "In Progress",
+      created_at: successor_created_at,
       description: "<!-- loophony-handoff:v1 source_issue_id=current target_model=gpt-5.6-sol -->"
     }
 
     refute AgentRunner.terminal_handoff_ready_for_test(
              current,
              [in_progress_successor],
-             [handoff]
+             [handoff],
+             session_started_at
+           )
+
+    reused_successor = %Issue{
+      id: "reused-successor",
+      identifier: "MT-606",
+      state: "Todo",
+      created_at: ~U[2026-07-23 04:59:59Z],
+      description: "<!-- loophony-handoff:v1 source_issue_id=current target_model=gpt-5.6-sol -->"
+    }
+
+    refute AgentRunner.terminal_handoff_ready_for_test(
+             current,
+             [reused_successor],
+             [handoff],
+             session_started_at
+           )
+
+    missing_created_at = %{reused_successor | id: "missing-created-at", created_at: nil}
+
+    refute AgentRunner.terminal_handoff_ready_for_test(
+             current,
+             [missing_created_at],
+             [handoff],
+             session_started_at
            )
   end
 

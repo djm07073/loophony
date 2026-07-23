@@ -19,14 +19,15 @@ and OpenSearch 3.6 hybrid search let Codex answer natural-language questions acr
   globally. Linear may contain multiple aligned `Todo` issues, but only one executable issue may
   be `In Progress`.
 - Unmarked issues start as `gpt-5.6-sol` planning and judgment sessions. When implementation is
-  required, that session creates or reuses a linked Todo successor containing a durable
+  required, that session creates a new linked Todo successor during the current session containing a durable
   `loophony-handoff:v1` marker and a complete execution packet. The successor starts in a fresh
   top-level session on either `gpt-5.3-codex-spark` for bounded coding/tests or `gpt-5.6-sol` when
   complex judgment remains. The source session never executes its successor.
 - Session-boundary invariants fail closed: an execution issue must have exactly one marker, a
   different terminal source issue, and an allowed model. A source issue cannot finish unless a
-  distinct marked Todo successor is re-read from Linear and named by the terminal checkpoint, or
-  the checkpoint contains an explicit root-goal termination reason.
+  distinct marked Todo successor created after the source session began is re-read from Linear and
+  named by the terminal checkpoint, or the checkpoint contains an explicit root-goal termination
+  reason. Existing Todo issues cannot be repurposed as successors.
 - Issues with verified evidence may move directly to `Done`; they do not accumulate in human
   review.
 - A valid negative result is also `Done` with a durable `rejected` evidence outcome. Workers never
@@ -144,9 +145,9 @@ If the goal is already fully proven or no safe next increment exists, do not cre
 explain why. After creation, show the issue identifier, URL, and mapped success criterion.
 ```
 
-This is the only issue that normally needs manual seeding. Before a worker finishes, it creates or
-reuses exactly one suitable next `Candidate` unless the root goal is fully proven or the current
-issue is `Blocked`.
+This is the only issue that normally needs manual seeding. Before a worker finishes, it creates
+exactly one new suitable next `Candidate` during that session unless the root goal is fully proven
+or the current issue is `Blocked`.
 
 ### 4. Configure and start the daemon
 
@@ -320,7 +321,7 @@ flowchart TD
     C --> D["Select one aligned Candidate / Ready Work issue"]
     D --> E["Fresh Sol planning / judgment session"]
     E --> F["Read project, issue, linked Human request, repo, and checkpoints"]
-    F --> G["Create or reuse marked Todo successor"]
+    F --> G["Create a newly timestamped marked Todo successor"]
     G --> H["Fresh Spark or Sol execution session"]
     H --> I["Implement and verify one bounded increment"]
     I --> J{"Outcome"}

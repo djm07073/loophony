@@ -545,16 +545,17 @@ it is terminal. It MUST then pass the target model in the app-server thread-star
 source, nonterminal source, self-reference, duplicate marker, or disallowed model MUST fail closed
 before workspace execution.
 
-Before terminal completion, the scheduler MUST re-read a distinct Todo successor whose single
-marker points to the current immutable issue ID and names an allowed model. The terminal
-`learn`/`handoff` checkpoint MUST name that successor by identifier or immutable ID. If any proof is
-missing, the scheduler MUST restore the current issue to `In Progress`. A successor-free terminal
-transition is allowed only when the checkpoint contains
+Before terminal completion, the scheduler MUST re-read a distinct Todo successor whose `created_at`
+is equal to or later than the current source session start and whose single marker points to the
+current immutable issue ID and names an allowed model. The terminal `learn`/`handoff` checkpoint
+MUST name that successor by identifier or immutable ID. If any proof is missing, the scheduler MUST
+restore the current issue to `In Progress`. A successor-free terminal transition is allowed only
+when the checkpoint contains
 `termination_reason=<bounded root-goal reason>`.
 
-An implementation MAY reuse an existing Todo issue instead of creating a duplicate, but it MUST
-update that issue with the current source marker and full execution contract before treating it as
-the successor. The source session MUST NOT execute its successor.
+An implementation MUST NOT reuse or repurpose an issue created before the current source session
+started. It MUST create one new Todo successor during that session and copy the full execution
+contract into it. The source session MUST NOT execute its successor.
 
 #### 5.3.11 `budget` (object, OPTIONAL extension)
 
@@ -653,8 +654,8 @@ fields locally if they want stricter startup checks.
   - The launched process MUST speak a compatible app-server protocol over stdio.
   - Bundled Loophony workflows use `gpt-5.6-sol` at `medium` reasoning for unmarked planning and
     judgment issues.
-  - When source-code or test-file edits are required, the planning session MUST create or reuse a
-    marked Todo successor with a complete execution packet. Bounded implementation/tests normally
+  - When source-code or test-file edits are required, the planning session MUST create a new marked
+    Todo successor during that session with a complete execution packet. Bounded implementation/tests normally
     target a fresh top-level `gpt-5.3-codex-spark` session. Work that still needs complex judgment
     targets a fresh top-level `gpt-5.6-sol` session.
   - Session routing uses the targeted app-server's per-thread model field. It does not rely on a

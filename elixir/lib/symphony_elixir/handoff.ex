@@ -99,6 +99,19 @@ defmodule SymphonyElixir.Handoff do
     source_issue_id in source_issue_ids(issue)
   end
 
+  @spec created_during_session?(Issue.t() | map(), DateTime.t()) :: boolean()
+  def created_during_session?(issue, %DateTime{} = session_started_at) when is_map(issue) do
+    case value(issue, :created_at) do
+      %DateTime{} = created_at ->
+        DateTime.compare(created_at, session_started_at) in [:gt, :eq]
+
+      _ ->
+        false
+    end
+  end
+
+  def created_during_session?(_issue, _session_started_at), do: false
+
   @spec prompt_context(Issue.t() | map(), route()) :: String.t()
   def prompt_context(issue, %{role: :executor, model: model, source_issue_id: source_issue_id})
       when is_map(issue) and is_binary(model) and is_binary(source_issue_id) do
@@ -111,7 +124,8 @@ defmodule SymphonyElixir.Handoff do
     - This is a fresh execution session. Implement and test only the bounded contract copied into
       this issue. Do not rely on the source session's hidden context.
     - If another distinct judgment or implementation cycle remains, create a new linked Todo issue
-      with a `loophony-handoff:v1` marker and finish this issue without executing the successor.
+      during this session, add a `loophony-handoff:v1` marker, and finish this issue without
+      executing the successor. Never repurpose an issue that existed before this session started.
     """
     |> String.trim()
   end
@@ -127,10 +141,11 @@ defmodule SymphonyElixir.Handoff do
     - Selected top-level model: `#{model}`
     - Default execution model: `#{settings.default_execution_model}`
     - Allowed successor models: #{Enum.join(settings.allowed_models, ", ")}
-    - When new repository coding or test work is required, finish the judgment first and create or
-      reuse exactly one linked Todo execution issue. Copy the full implementation scope,
+    - When new repository coding or test work is required, finish the judgment first and create
+      exactly one new linked Todo execution issue during this session. Never repurpose an older
+      Todo issue. Copy the full implementation scope,
       reproduction evidence, file boundaries, acceptance checks, validation commands, risks, and
-      non-goals into that issue. Do not implement that successor inside this session.
+      non-goals into that new issue. Do not implement that successor inside this session.
     - Use `#{marker("<SOURCE_ISSUE_ID>", "<TARGET_MODEL>")}` once in the successor description.
       Choose `#{settings.default_execution_model}` for bounded, unambiguous implementation and
       `#{settings.planner_model}` when the next session still requires complex judgment. The source

@@ -63,6 +63,28 @@ defmodule SymphonyElixir.HandoffTest do
     assert Handoff.successor_of?(duplicate, "plan-2")
   end
 
+  test "successors must be created during the source session" do
+    session_started_at = ~U[2026-07-23 05:00:00Z]
+
+    assert Handoff.created_during_session?(
+             %Issue{created_at: ~U[2026-07-23 05:00:00Z]},
+             session_started_at
+           )
+
+    assert Handoff.created_during_session?(
+             %{"created_at" => ~U[2026-07-23 05:00:01Z]},
+             session_started_at
+           )
+
+    refute Handoff.created_during_session?(
+             %Issue{created_at: ~U[2026-07-23 04:59:59Z]},
+             session_started_at
+           )
+
+    refute Handoff.created_during_session?(%Issue{created_at: nil}, session_started_at)
+    refute Handoff.created_during_session?(%Issue{}, nil)
+  end
+
   test "handoff routing fails closed for a model outside the configured allowlist" do
     issue = %Issue{
       id: "execute-invalid",

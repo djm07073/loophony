@@ -30,9 +30,10 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   @doc false
-  @spec terminal_handoff_ready_for_test(Issue.t(), [Issue.t()], [map()]) :: boolean()
-  def terminal_handoff_ready_for_test(%Issue{} = issue, candidates, checkpoints) do
-    terminal_handoff_ready?(issue, candidates, checkpoints)
+  @spec terminal_handoff_ready_for_test(Issue.t(), [Issue.t()], [map()], DateTime.t() | nil) ::
+          boolean()
+  def terminal_handoff_ready_for_test(%Issue{} = issue, candidates, checkpoints, session_started_at \\ nil) do
+    terminal_handoff_ready?(issue, candidates, checkpoints, session_started_at)
   end
 
   @doc false
@@ -123,6 +124,8 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       :ok ->
+        session_started_at = DateTime.utc_now()
+
         with {:ok, session} <-
                AppServer.start_session(workspace, worker_host: worker_host, model: route.model) do
           context = %{
@@ -132,7 +135,8 @@ defmodule SymphonyElixir.AgentRunner do
             opts: opts,
             issue_state_fetcher: issue_state_fetcher,
             max_turns: max_turns,
-            route: route
+            route: route,
+            session_started_at: session_started_at
           }
 
           try do
@@ -328,7 +332,13 @@ defmodule SymphonyElixir.AgentRunner do
 
     with {:ok, candidates} <- candidate_fetcher.(),
          {:ok, checkpoints} <- checkpoint_fetcher.(issue.id),
-         true <- terminal_handoff_ready?(issue, candidates, checkpoints) do
+         true <-
+           terminal_handoff_ready?(
+             issue,
+             candidates,
+             checkpoints,
+             context.session_started_at
+           ) do
       :ok
     else
       reason ->
@@ -352,7 +362,12 @@ defmodule SymphonyElixir.AgentRunner do
   defp continue_restored_issue(_restored_issue, _context),
     do: {:error, :terminal_handoff_incomplete}
 
-  defp terminal_handoff_ready?(%Issue{id: issue_id}, candidates, checkpoints)
+  defp terminal_handoff_ready?(
+         %Issue{id: issue_id},
+         candidates,
+         checkpoints,
+         session_started_at
+       )
        when is_list(candidates) and is_list(checkpoints) do
     latest_terminal_handoff =
       Enum.find(checkpoints, fn checkpoint ->
@@ -360,7 +375,7 @@ defmodule SymphonyElixir.AgentRunner do
           Map.get(checkpoint, :outcome) in ["done", "rejected"]
       end)
 
-    successor = verified_successor(issue_id, candidates)
+    successor = verified_successor(issue_id, candidates, session_started_at)
 
     successor_verified? =
       not is_nil(successor) and terminal_checkpoint_names_successor?(latest_terminal_handoff, successor)
@@ -377,15 +392,17 @@ defmodule SymphonyElixir.AgentRunner do
     not is_nil(latest_terminal_handoff) and (successor_verified? or explicit_termination)
   end
 
-  defp terminal_handoff_ready?(_issue, _candidates, _checkpoints), do: false
+  defp terminal_handoff_ready?(_issue, _candidates, _checkpoints, _session_started_at), do: false
 
-  defp verified_successor(issue_id, candidates) do
+  defp verified_successor(issue_id, candidates, session_started_at) do
     handoff_enabled? = Config.settings!().handoff.enabled
 
     Enum.find(candidates, fn
       %Issue{id: candidate_id} = candidate when is_binary(candidate_id) and candidate_id != issue_id ->
         not handoff_enabled? or
-          (todo_issue?(candidate) and valid_handoff_successor?(candidate, issue_id))
+          (todo_issue?(candidate) and
+             Handoff.created_during_session?(candidate, session_started_at) and
+             valid_handoff_successor?(candidate, issue_id))
 
       _ ->
         false

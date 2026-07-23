@@ -185,9 +185,10 @@ Notes:
   bounded implementation/tests to a fresh Spark session or complex implementation to a fresh Sol
   session.
 - Handoff startup fails closed unless the source issue is distinct and terminal. Terminal
-  completion fails closed unless Linear contains a distinct marked Todo successor tied to the
-  current issue and named in the final checkpoint, or the checkpoint records an explicit root-goal
-  termination reason.
+  completion fails closed unless Linear contains a distinct marked Todo successor created after
+  the current session began, tied to the current issue, and named in the final checkpoint, or the
+  checkpoint records an explicit root-goal termination reason. Older Todo issues cannot be
+  repurposed as successors.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.

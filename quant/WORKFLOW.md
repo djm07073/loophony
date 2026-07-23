@@ -228,8 +228,9 @@ No description was provided.
 - Obey the injected Loophony session role before repository edits:
   - An unmarked issue is a `gpt-5.6-sol` planning/judgment session. Complete the research design,
     reproduction, pre-registration, bounded implementation contract, and acceptance design first.
-    If new source-code or test-file edits are required, create or reuse one linked Todo execution
-    issue and do not implement that successor in this session.
+    If new source-code or test-file edits are required, create one new linked Todo execution issue
+    during this session and do not implement that successor in this session. Never repurpose an
+    older Todo issue.
   - Put exactly one marker in the successor description:
     `<!-- loophony-handoff:v1 source_issue_id=<CURRENT_LINEAR_ISSUE_ID> target_model=<MODEL> -->`.
     Use `gpt-5.3-codex-spark` for unambiguous bounded implementation/tests. Use `gpt-5.6-sol` when
@@ -311,11 +312,9 @@ Before terminal completion, unless the root goal is fully proven or this issue i
    `In Progress` issue. Multiple Todo issues are valid and remain priority-ordered queue entries.
    If another In Progress issue exists, leave all issues unchanged, record the conflict as
    `Blocked`, mention the reviewer, and do not create a replacement in this turn.
-3. If one or more adequate Todo issues already exist, reuse the highest-priority oldest matching
-   issue and update it only when necessary; do not create a duplicate. Before reuse, make it an
-   explicit successor of this issue by adding or correcting the single `loophony-handoff:v1`
-   marker with this issue's immutable Linear ID and the selected target model.
-4. Otherwise create exactly one child issue in `Todo` with label `symphony-quant`, related to
+3. Do not reuse or repurpose any Todo issue that existed before this session started, even when it
+   appears adequate. Existing Todo issues remain independent priority-ordered queue entries.
+4. Create exactly one new child issue during this session in `Todo` with label `symphony-quant`, related to
    the current issue, and assigned to the same user as the current issue. Treat it as another
    queued Candidate. Never leave its assignee empty: copy the current assignee ID, or query `viewer` and
    use that ID when the current issue is unexpectedly unassigned. Include:
@@ -329,10 +328,11 @@ Before terminal completion, unless the root goal is fully proven or this issue i
    - one bounded objective, exact file/implementation scope, deterministic acceptance checks, and
      validation commands;
    - the next falsification test, risks, expected handback, and explicit non-goals.
-5. Re-fetch the next issue and verify its `Todo` state, `symphony-quant` label, inherited assignee,
-   parent root, single active-stage mapping, source issue ID, and allowed target model. Do not claim
-   or execute it. The next Symphony session must independently repeat alignment and receives the
-   issue in a fresh Spark or Sol top-level session.
+5. Re-fetch the next issue and verify its `createdAt` is not earlier than this session start, its
+   `Todo` state, `symphony-quant` label, inherited assignee, parent root, single active-stage
+   mapping, source issue ID, and allowed target model. Do not claim or execute it. The next
+   Symphony session must independently repeat alignment and receives the issue in a fresh Spark or
+   Sol top-level session.
    For a normal successor handoff, create or activate that Candidate and transition the current
    issue to `Done` in one GraphQL operation; never transition the current issue first. Loophony
    independently re-reads the eligible Candidate after the turn and restores the current issue to
@@ -364,5 +364,5 @@ Candidates merely because a human has not reviewed recent progress.
 - Preserve the invariant that one research loop corresponds to exactly one Linear issue.
 
 Final response: report the chosen outcome, evidence, artifact/commit references, Linear state, and
-whether the next Candidate was reused, created, or intentionally omitted. Do not ask a follow-up
-question unless the outcome is `Blocked`.
+whether the next Candidate was newly created during this session or intentionally omitted. Do not
+ask a follow-up question unless the outcome is `Blocked`.
