@@ -122,23 +122,35 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
+    with :ok <- validate_tracker_settings(settings.tracker) do
+      validate_memory_settings(settings.memory)
+    end
+  end
+
+  defp validate_tracker_settings(tracker) do
     cond do
-      is_nil(settings.tracker.kind) ->
+      is_nil(tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
-        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
+      tracker.kind not in ["linear", "memory"] ->
+        {:error, {:unsupported_tracker_kind, tracker.kind}}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
+      tracker.kind == "linear" and not is_binary(tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
+      tracker.kind == "linear" and not is_binary(tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
 
       true ->
         :ok
     end
   end
+
+  defp validate_memory_settings(%{enabled: true, onyx_api_url: onyx_api_url})
+       when not is_binary(onyx_api_url),
+       do: {:error, :missing_memory_onyx_api_url}
+
+  defp validate_memory_settings(_memory), do: :ok
 
   defp format_config_error(reason) do
     case reason do
@@ -153,6 +165,9 @@ defmodule SymphonyElixir.Config do
 
       :workflow_front_matter_not_a_map ->
         "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+
+      :missing_memory_onyx_api_url ->
+        "Invalid WORKFLOW.md config: memory.onyx_api_url is required when memory.enabled is true"
 
       other ->
         "Invalid WORKFLOW.md config: #{inspect(other)}"

@@ -325,7 +325,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "identifier" => "MT-1",
       "title" => "Blocked todo",
       "description" => "Needs dependency",
-      "project" => %{"description" => "Canonical project objective"},
+      "project" => %{
+        "id" => "project-1",
+        "name" => "ProbEdge",
+        "slugId" => "probedge-123",
+        "description" => "Short project summary",
+        "content" => "Canonical project objective",
+        "url" => "https://linear.app/example/project/probedge-123",
+        "updatedAt" => "2026-01-01T12:00:00Z"
+      },
       "priority" => 2,
       "state" => %{"name" => "Todo"},
       "branchName" => "mt-1",
@@ -364,7 +372,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
+    assert issue.project_id == "project-1"
+    assert issue.project_name == "ProbEdge"
+    assert issue.project_slug == "probedge-123"
     assert issue.project_description == "Canonical project objective"
+    assert issue.project_url == "https://linear.app/example/project/probedge-123"
+    assert issue.project_updated_at == ~U[2026-01-01 12:00:00Z]
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
   end
@@ -862,6 +875,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.agent.max_concurrent_agents == 1
     assert config.agent.max_queued_issues == 1
     assert config.codex.command == "codex app-server"
+    assert config.audit.enabled
+    assert config.audit.query_limit == 100
+    assert config.audit.database_path == Path.join(config.workspace.root, "_loop/loophony-audit.sqlite3")
+    assert config.automation.enabled
+    assert config.automation.database_path == Path.join(config.workspace.root, "_loop/loophony-runtime.sqlite3")
+    assert config.automation.allowed_http_hosts == ["127.0.0.1", "localhost"]
+    refute config.budget.enabled
+    assert config.budget.on_exhausted == "warn"
+    refute config.goal_policy.enabled
+    assert config.memory.health_probe_interval_ms == 60_000
+    assert config.memory.failure_threshold == 2
+    assert config.memory.circuit_breaker_ms == 30_000
 
     assert config.codex.approval_policy == %{
              "reject" => %{
@@ -888,6 +913,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
+    assert config.observability.linear_heartbeat_interval_ms == 0
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_required_labels: [" Symphony ", "SYMPHONY", "JavaScript"]
@@ -971,6 +997,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       observability_enabled: "maybe",
       observability_refresh_ms: %{bad: true},
       observability_render_interval_ms: %{bad: true},
+      observability_linear_heartbeat_interval_ms: -1,
       server_port: -1,
       server_host: 123
     )

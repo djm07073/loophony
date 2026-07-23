@@ -42,7 +42,11 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "type" => "object"
                },
                "name" => "symphony_loop_checkpoint"
-             }
+             },
+             %{"name" => "symphony_wait"},
+             %{"name" => "symphony_job_start"},
+             %{"name" => "symphony_job_status"},
+             %{"name" => "symphony_job_stop"}
            ] = DynamicTool.tool_specs()
 
     assert description =~ "Linear"
@@ -57,7 +61,14 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql", "symphony_loop_checkpoint"]
+               "supportedTools" => [
+                 "linear_graphql",
+                 "symphony_loop_checkpoint",
+                 "symphony_wait",
+                 "symphony_job_start",
+                 "symphony_job_status",
+                 "symphony_job_stop"
+               ]
              }
            }
 
@@ -70,7 +81,13 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
   end
 
   test "symphony_loop_checkpoint records structured issue feedback" do
-    issue = %Issue{id: "issue-loop", identifier: "QNT-LOOP"}
+    issue = %Issue{
+      id: "issue-loop",
+      identifier: "QNT-LOOP",
+      description: "Implement [SC-03] fair-value calibration.",
+      project_description: "**Outcome:** Extract a net-of-cost trading policy."
+    }
+
     test_pid = self()
     arguments = checkpoint_arguments()
 
@@ -78,15 +95,59 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       DynamicTool.execute("symphony_loop_checkpoint", arguments,
         issue: issue,
         turn_number: 3,
+        session_id: "thread-loop-turn-loop",
         loop_recorder: fn recorded_issue, recorded_arguments, turn_number ->
           send(test_pid, {:checkpoint_recorded, recorded_issue, recorded_arguments, turn_number})
           {:ok, %{id: 7, outcome: "continue"}}
+        end,
+        memory_indexer: fn checkpoint, context ->
+          send(test_pid, {:checkpoint_indexed, checkpoint, context})
+          :ok
+        end,
+        checkpoint_publisher: fn published_issue, checkpoint ->
+          send(test_pid, {:checkpoint_published, published_issue, checkpoint})
+          {:ok, %{status: "appended", fingerprint: "abc123"}}
         end
       )
 
-    assert_received {:checkpoint_recorded, ^issue, ^arguments, 3}
+    assert_received {:checkpoint_recorded, ^issue, recorded_arguments, 3}
+    assert Map.drop(recorded_arguments, [:session_id]) == arguments
+    assert recorded_arguments.session_id == "thread-loop-turn-loop"
+    assert_received {:checkpoint_indexed, %{id: 7, outcome: "continue"}, context}
+    assert context.session_id == "thread-loop-turn-loop"
+    assert context.issue_description == "Implement [SC-03] fair-value calibration."
+    assert context.project_description == "**Outcome:** Extract a net-of-cost trading policy."
+    assert_received {:checkpoint_published, ^issue, %{id: 7, outcome: "continue"}}
     assert response["success"] == true
-    assert Jason.decode!(response["output"]) == %{"id" => 7, "outcome" => "continue"}
+
+    assert Jason.decode!(response["output"]) == %{
+             "id" => 7,
+             "outcome" => "continue",
+             "linear_progress" => %{
+               "status" => "appended",
+               "fingerprint" => "abc123"
+             }
+           }
+  end
+
+  test "symphony_loop_checkpoint reports retryable Linear append failures" do
+    issue = %Issue{id: "issue-loop", identifier: "QNT-LOOP"}
+
+    response =
+      DynamicTool.execute("symphony_loop_checkpoint", checkpoint_arguments(),
+        issue: issue,
+        loop_recorder: fn _issue, _arguments, _turn ->
+          {:ok, %{checkpoint_key: "cycle-1", outcome: "continue"}}
+        end,
+        memory_indexer: fn _checkpoint, _context -> :ok end,
+        checkpoint_publisher: fn _issue, _checkpoint -> {:error, :linear_unavailable} end
+      )
+
+    assert response["success"] == false
+    error = Jason.decode!(response["output"])["error"]
+    assert error["checkpointKey"] == "cycle-1"
+    assert error["retryable"] == true
+    assert error["reason"] == ":linear_unavailable"
   end
 
   test "symphony_loop_checkpoint returns actionable failures" do

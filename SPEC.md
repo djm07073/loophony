@@ -400,7 +400,43 @@ Fields:
   - Maximum: `100`
   - Controls the recent checkpoint window used by status and prompt context.
 
-#### 5.3.5 `review` (object, OPTIONAL extension)
+#### 5.3.5 `memory` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `false`
+- `onyx_api_url` (Onyx API URL), default `http://127.0.0.1:8780`, REQUIRED when enabled
+- `onyx_api_key` (string or `$VAR`), REQUIRED when enabled
+- `project` (non-empty string), default `loophony`
+- `search_limit` (positive integer, maximum `100`), default `12`
+- `health_probe_interval_ms` (positive integer), default `60000`
+- `failure_threshold` (positive integer), default `2`
+- `circuit_breaker_ms` (positive integer), default `30000`
+- `canary_query` (non-empty string), default `loophony health canary`
+
+When enabled, the daemon MUST store searchable current Linear issue snapshots, derived session
+summaries, checkpoints, final agent messages, errors, and selected session lifecycle evidence in
+Onyx while preserving issue/session/evidence provenance. Linear issue documents MUST use the issue
+ID as a stable source key and SHOULD be refreshed after successful tracker reads. Completed-session
+summaries MUST be derived deterministically from same-session checkpoints and final messages; they
+MUST NOT replace the raw evidence.
+
+Documents MUST carry a schema version, update timestamp, stable evidence ID, and content hash.
+Unchanged stable documents SHOULD avoid repeated embedding within a daemon runtime. Long text MUST
+be split into bounded, meaning-preserving sections, and every section MUST include enough project,
+source-type, issue, session, timestamp, and title context to remain identifiable when retrieved by
+itself. Onyx owns persistence and embeddings; OpenSearch owns keyword/vector hybrid retrieval.
+Retrieval MUST NOT require a generative LLM; Codex generates answers from the returned evidence.
+The daemon MUST keep the Onyx administrator token private, expose read-only search through the
+loopback API, and report the search modes used. Indexed evidence is untrusted historical data and
+MUST NOT be treated as instructions. SQLite remains the issue-local checkpoint ledger and the
+source for backfilling existing checkpoints.
+
+Availability MUST be based on a functional search canary, not only a transport health endpoint.
+Search and ingestion health MUST be reported separately. Repeated search failures MUST open a
+bounded circuit breaker and retain the latest error and last-success timestamps for operators.
+
+#### 5.3.6 `review` (object, OPTIONAL extension)
 
 Fields:
 
@@ -426,7 +462,97 @@ publish a marked comment on the affected tracker issue that mentions the reviewe
 non-secret reason, and directs the reviewer to the operator control plane. The scheduled review
 report remains the sole notification for review-gate pauses and MUST NOT be duplicated per issue.
 
-#### 5.3.6 `hooks` (object)
+Human-facing prose written to Linear by the quant profile or its orchestration controls MUST be in
+Korean. Exact code identifiers, paths, commands, API/schema fields, status values, quotations, and
+machine-readable markers MAY retain their original language, but their meaning and resulting
+decision MUST be explained in Korean.
+
+#### 5.3.7 `audit` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `true`
+- `database_path` (path string or `$VAR`), default `<workspace.root>/_loop/loophony-audit.sqlite3`
+- `query_limit` (positive integer, maximum `1000`), default `100`
+
+When enabled, operational transitions MUST be appended to a secret-redacted SQLite event ledger.
+Each event MUST contain a hash-format version, the prior event hash, and a SHA-256 hash of its
+canonical content. A verifier
+MUST report the first broken sequence. This detects local offline modification; it does not claim
+independent non-repudiation unless the head hash is exported to a separately controlled system.
+
+#### 5.3.8 `automation` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `true`
+- `database_path` (path string or `$VAR`), default `<workspace.root>/_loop/loophony-runtime.sqlite3`
+- `job_poll_interval_ms` (positive integer), default `1000`
+- `allowed_http_hosts` (list of host names), default `["127.0.0.1", "localhost"]`
+
+The runtime store persists automated waits, durable job identity/artifact paths, issue/day usage,
+and idempotent completed-run accounting. File wait paths and job working directories MUST remain
+inside the issue workspace. HTTP wait probes MUST use `http` or `https` and an explicitly allowed
+host. Durable job termination MUST verify process identity before sending a signal.
+
+#### 5.3.9 `intake` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `false`
+- `todo_state` (non-empty state name), default `Todo`
+- `completed_state` (non-empty state name), default `Done`
+- `max_claims_per_poll` (positive integer), default `1`
+
+When enabled, each accepted operator input MUST create a new tracker issue containing the
+`loophony-human-request:v1` description marker. Human issues MUST NOT be dispatched directly.
+Before normal candidate selection, the scheduler MUST sort Human issues in `todo_state` by Linear
+priority (`1` through `4`, then no priority) and creation time, then claim at most
+`max_claims_per_poll`. A claim MUST create or recover a `[Work]` issue whose description contains a
+stable source-Human issue marker, retain the Human issue priority and tracker routing context, and
+leave the Human request in `todo_state` while its Work issue is open. The implementation SHOULD
+create a native tracker relation between both issues; the description marker remains the recovery
+and idempotency source of truth.
+A terminal Work issue MUST move its source Human issue to `completed_state`.
+An intake-enabled `preempt` MUST move the interrupted source issue to `todo_state` before normal
+dispatch resumes so the single-In-Progress invariant leaves room for the new Work issue. When the
+operator omits a Linear priority, a preempt request defaults to urgent priority (`1`). New Human
+and Work issues SHOULD inherit the source issue's explicit `Mapped stage`, or the project's active
+stage when the source has no explicit mapping.
+
+#### 5.3.10 `budget` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `false`
+- `max_tokens_per_issue` (positive integer), default `5000000`
+- `max_tokens_per_day` (positive integer), default `20000000`
+- `max_active_seconds_per_issue` (positive integer), default `3600`
+- `warn_at_percent` (integer `1..100`), default `70`
+- `on_exhausted` (`warn`, `block`, or `wait`), default `warn`
+
+Usage MUST be updated from monotonic Codex totals and completed run IDs MUST be idempotent. The
+runtime warns once at the configured threshold. When `on_exhausted=warn`, exhaustion MUST append a
+one-time tracker warning and audit event without stopping the active worker. `block` remains an
+explicit fail-closed option. When `on_exhausted=wait`, a daily-token-only exhaustion MAY register a
+durable wait until the next UTC day; non-renewing issue limits still block.
+
+#### 5.3.11 `goal_policy` (object, OPTIONAL extension)
+
+Fields:
+
+- `enabled` (boolean), default `false`
+- `require_goal_version` (boolean), default `true`
+- `require_active_stage` (boolean), default `true`
+- `enforce_single_in_progress` (boolean), default `true`
+
+When enabled, dispatch MUST fail closed unless the project description contains the configured
+version/active-stage markers, at most one executable issue is `In Progress`, and each candidate
+maps to the single active `SC-XX` stage. Multiple aligned `Todo` issues are valid. When exactly one
+issue is `In Progress`, it is the only dispatch-eligible issue; Todo work remains queued. Review
+status SHOULD expose whether its recorded goal version is stale.
+
+#### 5.3.12 `hooks` (object)
 
 Fields:
 
@@ -450,7 +576,7 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.7 `agent` (object)
+#### 5.3.13 `agent` (object)
 
 Fields:
 
@@ -473,7 +599,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.8 `codex` (object)
+#### 5.3.14 `codex` (object)
 
 Fields:
 
@@ -489,6 +615,15 @@ fields locally if they want stricter startup checks.
   - Default: `codex app-server`
   - The runtime launches this command via `bash -lc` in the workspace directory.
   - The launched process MUST speak a compatible app-server protocol over stdio.
+  - Bundled Loophony workflows pin the top-level planning and acceptance session to
+    `gpt-5.6-sol` at `medium` reasoning and the default subagent to
+    `gpt-5.3-codex-spark` at `medium` reasoning.
+  - When source-code or test-file edits are required, those workflows delegate one bounded
+    implementation to one Spark subagent in the shared issue workspace. The parent session MUST
+    retain ownership of the plan, tracker/checkpoint writes, complete-diff review, required
+    validation, completion decision, publishing, and handoff.
+  - Work that does not require repository edits MUST NOT create the coding subagent. A subagent
+    startup failure falls back to parent implementation and is not an external blocker.
 - `approval_policy` (Codex `AskForApproval` value)
   - Default: implementation-defined.
 - `thread_sandbox` (Codex `SandboxMode` value)
@@ -630,11 +765,41 @@ not require recognizing or validating extension fields unless that extension is 
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `loop.database_path`: path resolved to absolute, default `<workspace.root>/_loop/symphony-loop.sqlite3`
 - `loop.recent_limit`: integer, default `12`, valid range `1..100`
+- `memory.enabled`: boolean, default `false`
+- `memory.onyx_api_url`: Onyx API URL, default `http://127.0.0.1:8780`, required when enabled
+- `memory.onyx_api_key`: string or `$VAR`, required when enabled
+- `memory.project`: non-empty string, default `loophony`
+- `memory.search_limit`: integer, default `12`, valid range `1..100`
+- `memory.health_probe_interval_ms`: positive integer, default `60000`
+- `memory.failure_threshold`: positive integer, default `2`
+- `memory.circuit_breaker_ms`: positive integer, default `30000`
+- `memory.canary_query`: non-empty string, default `loophony health canary`
 - `review.enabled`: boolean, default `false`
 - `review.timezone`: string, current supported value `Asia/Seoul`
 - `review.times`: unique `HH:MM` list, default `["10:00", "22:00"]`
 - `review.issue_identifier`: tracker issue identifier, required when review is enabled
 - `review.reviewer`: tracker mention, required when review is enabled
+- `audit.enabled`: boolean, default `true`
+- `audit.database_path`: path resolved to absolute, default `<workspace.root>/_loop/loophony-audit.sqlite3`
+- `audit.query_limit`: integer, default `100`, valid range `1..1000`
+- `automation.enabled`: boolean, default `true`
+- `automation.database_path`: path resolved to absolute, default `<workspace.root>/_loop/loophony-runtime.sqlite3`
+- `automation.job_poll_interval_ms`: positive integer, default `1000`
+- `automation.allowed_http_hosts`: host list, default `["127.0.0.1", "localhost"]`
+- `intake.enabled`: boolean, default `false`
+- `intake.todo_state`: non-empty string, default `Todo`
+- `intake.completed_state`: non-empty string, default `Done`
+- `intake.max_claims_per_poll`: positive integer, default `1`
+- `budget.enabled`: boolean, default `false`
+- `budget.max_tokens_per_issue`: positive integer, default `5000000`
+- `budget.max_tokens_per_day`: positive integer, default `20000000`
+- `budget.max_active_seconds_per_issue`: positive integer, default `3600`
+- `budget.warn_at_percent`: integer, default `70`, valid range `1..100`
+- `budget.on_exhausted`: `warn`, `block`, or `wait`, default `warn`
+- `goal_policy.enabled`: boolean, default `false`
+- `goal_policy.require_goal_version`: boolean, default `true`
+- `goal_policy.require_active_stage`: boolean, default `true`
+- `goal_policy.enforce_single_in_progress`: boolean, default `true`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -728,6 +893,8 @@ external-system decisions.
 - `Worker Exit (normal)`
   - Remove running entry.
   - Update aggregate runtime totals.
+  - If the issue has an active durable automated wait, do not schedule a retry; release the worker
+    slot and leave the issue in `Waiting` until its trigger is ready.
   - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
     turn loop.
 
@@ -738,6 +905,15 @@ external-system decisions.
 
 - `Codex Update Event`
   - Update live session fields, token counters, and rate limits.
+  - Persist monotonic usage deltas and enforce configured warning/exhaustion budgets.
+
+- `Automated Wait Ready`
+  - Mark the wait released with its machine-readable reason.
+  - Requeue the same issue and inject the released wait's resume hint into the fresh prompt.
+
+- `Durable Job Poll`
+  - Reconcile active job PID identity and its durable exit marker.
+  - Mark the job `completed`, `failed`, or `lost` without consuming a Codex turn.
 
 - `Retry Timer Fired`
   - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
@@ -753,7 +929,8 @@ external-system decisions.
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
+- Running Codex sessions and retry timers recover from tracker/filesystem state. Automated waits,
+  durable jobs, budget usage, and completed-run accounting recover from the runtime SQLite store.
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
 
 ## 8. Polling, Scheduling, and Reconciliation
@@ -767,13 +944,18 @@ The effective poll interval SHOULD be updated when workflow config changes are r
 
 Tick sequence:
 
-1. Reconcile running issues.
-2. Run dispatch preflight validation.
-3. Fetch candidate issues from tracker using active states.
-4. Sort issues by dispatch priority.
-5. Exclude running, claimed, and blocked issues, then retain at most one pending issue.
-6. Dispatch queued issues while slots remain.
-7. Notify observability/status consumers of state changes.
+1. Probe and release ready automated waits; reconcile durable jobs.
+2. Reconcile running issues and enforce active budgets.
+3. Reconcile Human intake: complete source Human issues for terminal Work issues, then materialize
+   the highest-priority oldest Todo Human requests as linked Work issues.
+4. Run dispatch preflight validation.
+5. Fetch candidate issues from tracker using active states.
+6. Exclude Human-marker issues from direct execution.
+7. Apply the configured durable goal policy.
+8. Sort issues by dispatch priority.
+9. Exclude running, claimed, waiting, and blocked issues, then retain at most one pending issue.
+10. Dispatch queued issues while slots remain.
+11. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
@@ -784,6 +966,8 @@ An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
 - Its state is in `active_states` and not in `terminal_states`.
+- It does not contain the `loophony-human-request:v1` description marker. Human issues are queue
+  requests and MUST execute only through their linked Work issues.
 - It is routed to this worker by the configured assignee and contains every
   label in `tracker.required_labels`.
 - It is not already in `running`.
@@ -857,7 +1041,22 @@ Part A: Stall detection
   - `last_codex_timestamp` if any event has been seen, else
   - `started_at`
 - If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
+- Before restarting a silent worker, append a Linear health-event comment containing the UTC and
+  KST detection time, last event time, silence duration, configured threshold, and recovery action.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
+
+Part A.1: Human-visible liveness
+
+- `observability.linear_heartbeat_interval_ms` controls append-only Linear health comments for
+  running issues. `0` disables publication; the quant profile uses `900000` (15 minutes).
+- A health comment includes UTC and KST observation times, daemon boot identity and start time,
+  worker liveness, session ID, last Codex event and time, silence duration, restart threshold, and
+  the next planned health publication time.
+- Health and checkpoint comments MUST be newly created top-level comments. Existing progress
+  comments MUST NOT be edited or deleted.
+- Durable checkpoint publication uses a semantic content fingerprint: identical retries MUST NOT
+  create another Linear comment, while changed content under a stable checkpoint key MUST append a
+  new immutable revision.
 
 Part B: Tracker state refresh
 
@@ -1118,7 +1317,8 @@ Unsupported dynamic tool calls:
 Optional client-side tool extension:
 
 - An implementation MAY expose a limited set of client-side tools to the app-server session.
-- Current standardized optional tools: `linear_graphql` and `symphony_loop_checkpoint`.
+- Current standardized optional tools: `linear_graphql`, `symphony_loop_checkpoint`,
+  `symphony_wait`, `symphony_job_start`, `symphony_job_status`, and `symphony_job_stop`.
 - If implemented, supported tools SHOULD be advertised to the app-server session during startup
   using the protocol mechanism supported by the targeted Codex app-server version.
 - Unsupported tool names SHOULD still return a failure result using the targeted protocol and
@@ -1163,7 +1363,7 @@ Optional client-side tool extension:
 - Preferred fields: stable `checkpoint_key`, `phase`, optional `goal_alignment`, `summary`,
   `decision`, evidence strings, `next_action`, and `outcome`.
 - Supported phases: `observe`, `orient`, `act`, `verify`, `learn`, and `handoff`.
-- Supported outcomes: `continue`, `done`, `rejected`, `blocked`, and `retry`.
+- Supported outcomes: `continue`, `waiting`, `done`, `rejected`, `blocked`, and `retry`.
 - One loop MUST correspond to exactly one Linear issue, with `issue_id` as its immutable identity.
   A checkpoint MUST NOT be inherited by or injected into a different issue.
 - The pair `(issue_id, checkpoint_key)` MUST be idempotent so corrected retries replace the same
@@ -1176,7 +1376,30 @@ Optional client-side tool extension:
   relations, evidence links, and acceptance checks rather than through implicit local-memory reads.
 - A status extension SHOULD expose availability, checkpoint count, outcome totals, and recent
   checkpoints without making the local store the human-facing source of truth.
-  in-session.
+
+`symphony_wait` extension contract:
+
+- Purpose: persist a non-human wait and release the Codex worker slot until a deterministic trigger
+  is ready.
+- A wait MUST include a reason and at least one wake timestamp or condition. Supported conditions
+  are workspace file existence, workspace file hash change, allowlisted HTTP status, and durable
+  job completion. An optional deadline also releases the wait.
+- File conditions MUST resolve inside the current issue workspace. HTTP probes MUST be restricted
+  to configured hosts. The current turn MUST end after successful registration.
+- A released wait's reason, release cause, and resume hint SHOULD be injected into the next fresh
+  prompt for that same issue. Automated `Waiting` MUST NOT be presented as human `Blocked`.
+
+`symphony_job_*` extension contract:
+
+- `symphony_job_start` accepts an executable, bounded argument array, and workspace-relative cwd;
+  it MUST NOT accept an arbitrary shell command string as the primary interface.
+- Jobs MUST run under a small supervisor wrapper that writes a stable log and atomic exit-code
+  marker. Store job ID, issue ID, command hash, cwd, PID, timestamps, status, and artifact paths.
+- A job start that cannot be persisted MUST terminate the just-started process. After restart, PID
+  liveness MUST be combined with a job-specific process-identity check so a reused PID is never
+  signaled as if it were the original job.
+- Worker-side status/stop calls MUST be limited to jobs owned by the current issue. The operator API
+  MAY stop a named job only through its authenticated local mutation path.
 
 User-input-required policy:
 
@@ -1594,12 +1817,21 @@ Minimum endpoints:
     ```
 
 - `POST /api/v1/operator-input` (extension)
-  - Accepts an operator `instruction`, `goal_adjustment`, or `unblock` for a managed issue.
+  - Accepts an operator `instruction`, `goal_adjustment`, `preempt`, or `unblock` for a managed
+    issue, plus optional `title` and Linear `priority` (`0..4`).
   - Requires the `x-loophony-control: codex-app` header and SHOULD be exposed only on loopback.
-  - Persists the input as a marked tracker comment before requesting an immediate poll/reconcile.
-  - Delivers input at the next safe agent continuation checkpoint rather than interrupting an
-    in-flight command.
-  - `unblock` MAY move the target issue to an explicitly supplied active state (default `Ready`).
+  - With Human intake enabled, persists every accepted input as a new `[Human]` issue in
+    `intake.todo_state` and returns that issue's identifier before requesting an immediate
+    poll/reconcile. Ordinary inputs MUST NOT interrupt or replace current work.
+  - The intake reconciler selects Human issues by priority and age and creates a linked `[Work]`
+    issue for normal dispatch. The Human issue remains the visible request record.
+  - `preempt` additionally moves the source issue to `intake.todo_state`, cooperatively sends Codex
+    `turn/interrupt`, and preserves the issue workspace. If no priority is supplied, the Human
+    request defaults to urgent (`1`). If Codex does not acknowledge the interrupt within a bounded
+    grace period, the orchestrator MAY terminate only the worker. The newly created Human request
+    still enters the same priority queue.
+  - `unblock` additionally MAY move the named source issue to an explicitly supplied active state
+    (default `Ready`).
 
   - If the issue identifier cannot be resolved by the current runtime snapshot or tracker, return
     `404` with an error response (for example
@@ -1628,11 +1860,20 @@ Minimum endpoints:
     gate and resuming dispatch.
   - The latest resolved decision SHOULD be injected into later agent sessions as operator guidance.
 
+- `GET /api/v1/audit` and `GET /api/v1/audit/verify` (extension)
+  - Return filtered recent audit events/summary and full hash-chain verification respectively.
+- `GET /api/v1/jobs` and `GET /api/v1/waits` (extension)
+  - Return durable job state and active automated waits without waking a Codex turn.
+- `POST /api/v1/jobs/:job_id/stop` (extension)
+  - Requires the `x-loophony-control: codex-app` header, verifies job process identity, and requests
+    graceful termination of that exact job.
+
 API design notes:
 
 - The JSON shapes above are the RECOMMENDED baseline for interoperability and debugging ergonomics.
 - Implementations MAY add fields, but SHOULD avoid breaking existing fields within a version.
-- Endpoints SHOULD be read-only except for operational triggers like `/refresh`.
+- Endpoints SHOULD be read-only except for authenticated operational triggers such as `/refresh`,
+  review/operator input, and exact-job stop.
 - Unsupported methods on defined routes SHOULD return `405 Method Not Allowed`.
 - API errors SHOULD use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
@@ -1696,15 +1937,21 @@ API design notes:
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+Running sessions, claims, blocked maps, and retry timers remain intentionally in memory. Automated
+waits, durable jobs, budget usage, completed-run IDs, checkpoints, review gates, and audit events
+are durable extensions. Human and Work description markers provide tracker-durable intake claim
+recovery and prevent duplicate Work creation. Restart recovery combines those stores with fresh
+tracker polling and preserved workspaces; it does not claim that a Codex session itself survives
+restart.
 
 After restart:
 
 - No retry timers are restored from prior process memory.
 - No running sessions are assumed recoverable.
+- Active automated waits are restored and probed without launching Codex until ready.
+- Durable jobs are reconciled from their process identity and exit marker; missing or mismatched
+  processes become `lost` and are never signaled by PID alone.
+- Budget totals and append-only audit history remain available across restart.
 - Service recovers by:
   - startup terminal workspace cleanup
   - fresh polling of active issues
@@ -2152,6 +2399,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   - stable keys upsert checkpoints for the current issue
   - terminal outcomes without evidence return structured failure
   - recent issue checkpoints are injected into the first prompt of a fresh session
+- If durable automation tools are implemented:
+  - file waits reject paths outside the current workspace and HTTP waits reject unconfigured hosts
+  - a successful wait ends the worker turn and resumes only after its persisted trigger is ready
+  - durable job start persists identity and artifacts or terminates the untracked process on failure
+  - worker-side job status/stop rejects jobs owned by another issue
+  - restart reconciliation never treats a reused PID as the original job
 
 ### 17.6 Observability
 
@@ -2163,6 +2416,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   not affect correctness
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without
   changing orchestrator behavior
+- Audit events redact secret-looking keys, accept structured timestamps, verify a valid hash chain,
+  and identify the first tampered sequence
+- Memory health requires a functional search canary and opens its circuit after configured failures
+- Status exposes `Waiting`, durable jobs, budget, goal-policy, memory, and audit health independently
 
 ### 17.7 CLI and Host Lifecycle
 

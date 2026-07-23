@@ -70,17 +70,20 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+    case Process.whereis(SymphonyElixir.Supervisor) do
+      supervisor when is_pid(supervisor) -> stop_http_server_child(supervisor)
+      nil -> :ok
+    end
+  end
+
+  defp stop_http_server_child(supervisor) do
+    case Enum.find(Supervisor.which_children(supervisor), fn
            {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
            _child -> false
          end) do
       {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
-
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
-        end
-
+        :ok = Supervisor.terminate_child(supervisor, SymphonyElixir.HttpServer)
+        if Process.alive?(pid), do: Process.exit(pid, :normal)
         :ok
 
       _ ->
@@ -104,6 +107,15 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           loop_database_path: nil,
           loop_recent_limit: 12,
+          intake_enabled: false,
+          intake_todo_state: "Todo",
+          intake_completed_state: "Done",
+          intake_max_claims_per_poll: 1,
+          memory_enabled: false,
+          memory_onyx_api_url: "http://127.0.0.1:8780",
+          memory_onyx_api_key: "onyx-test-key",
+          memory_project: "loophony",
+          memory_search_limit: 12,
           review_enabled: false,
           review_timezone: "Asia/Seoul",
           review_times: ["10:00", "22:00"],
@@ -131,6 +143,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
+          observability_linear_heartbeat_interval_ms: 0,
           server_port: nil,
           server_host: nil,
           prompt: @workflow_prompt
@@ -150,6 +163,15 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     loop_database_path = Keyword.get(config, :loop_database_path)
     loop_recent_limit = Keyword.get(config, :loop_recent_limit)
+    intake_enabled = Keyword.get(config, :intake_enabled)
+    intake_todo_state = Keyword.get(config, :intake_todo_state)
+    intake_completed_state = Keyword.get(config, :intake_completed_state)
+    intake_max_claims_per_poll = Keyword.get(config, :intake_max_claims_per_poll)
+    memory_enabled = Keyword.get(config, :memory_enabled)
+    memory_onyx_api_url = Keyword.get(config, :memory_onyx_api_url)
+    memory_onyx_api_key = Keyword.get(config, :memory_onyx_api_key)
+    memory_project = Keyword.get(config, :memory_project)
+    memory_search_limit = Keyword.get(config, :memory_search_limit)
     review_enabled = Keyword.get(config, :review_enabled)
     review_timezone = Keyword.get(config, :review_timezone)
     review_times = Keyword.get(config, :review_times)
@@ -177,6 +199,10 @@ defmodule SymphonyElixir.TestSupport do
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
+
+    observability_linear_heartbeat_interval_ms =
+      Keyword.get(config, :observability_linear_heartbeat_interval_ms)
+
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
@@ -200,6 +226,17 @@ defmodule SymphonyElixir.TestSupport do
         "loop:",
         "  database_path: #{yaml_value(loop_database_path)}",
         "  recent_limit: #{yaml_value(loop_recent_limit)}",
+        "intake:",
+        "  enabled: #{yaml_value(intake_enabled)}",
+        "  todo_state: #{yaml_value(intake_todo_state)}",
+        "  completed_state: #{yaml_value(intake_completed_state)}",
+        "  max_claims_per_poll: #{yaml_value(intake_max_claims_per_poll)}",
+        "memory:",
+        "  enabled: #{yaml_value(memory_enabled)}",
+        "  onyx_api_url: #{yaml_value(memory_onyx_api_url)}",
+        "  onyx_api_key: #{yaml_value(memory_onyx_api_key)}",
+        "  project: #{yaml_value(memory_project)}",
+        "  search_limit: #{yaml_value(memory_search_limit)}",
         "review:",
         "  enabled: #{yaml_value(review_enabled)}",
         "  timezone: #{yaml_value(review_timezone)}",
@@ -222,7 +259,12 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms,
+          observability_linear_heartbeat_interval_ms
+        ),
         server_yaml(server_port, server_host),
         "---",
         prompt
@@ -284,12 +326,13 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
+  defp observability_yaml(enabled, refresh_ms, render_interval_ms, linear_heartbeat_interval_ms) do
     [
       "observability:",
       "  dashboard_enabled: #{yaml_value(enabled)}",
       "  refresh_ms: #{yaml_value(refresh_ms)}",
-      "  render_interval_ms: #{yaml_value(render_interval_ms)}"
+      "  render_interval_ms: #{yaml_value(render_interval_ms)}",
+      "  linear_heartbeat_interval_ms: #{yaml_value(linear_heartbeat_interval_ms)}"
     ]
     |> Enum.join("\n")
   end

@@ -144,6 +144,141 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Audit do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: true)
+      field(:database_path, :string)
+      field(:query_limit, :integer, default: 100)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :database_path, :query_limit], empty_values: [])
+      |> validate_number(:query_limit, greater_than: 0, less_than_or_equal_to: 1_000)
+    end
+  end
+
+  defmodule Automation do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: true)
+      field(:database_path, :string)
+      field(:job_poll_interval_ms, :integer, default: 1_000)
+      field(:allowed_http_hosts, {:array, :string}, default: ["127.0.0.1", "localhost"])
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :database_path, :job_poll_interval_ms, :allowed_http_hosts], empty_values: [])
+      |> validate_number(:job_poll_interval_ms, greater_than: 0)
+      |> update_change(:allowed_http_hosts, fn hosts ->
+        hosts
+        |> Enum.map(&(String.trim(&1) |> String.downcase()))
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+      end)
+    end
+  end
+
+  defmodule Intake do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:todo_state, :string, default: "Todo")
+      field(:completed_state, :string, default: "Done")
+      field(:max_claims_per_poll, :integer, default: 1)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [:enabled, :todo_state, :completed_state, :max_claims_per_poll],
+        empty_values: []
+      )
+      |> validate_required([:todo_state, :completed_state])
+      |> validate_number(:max_claims_per_poll, greater_than: 0, less_than_or_equal_to: 20)
+    end
+  end
+
+  defmodule Budget do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:max_tokens_per_issue, :integer, default: 5_000_000)
+      field(:max_tokens_per_day, :integer, default: 20_000_000)
+      field(:max_active_seconds_per_issue, :integer, default: 3_600)
+      field(:warn_at_percent, :integer, default: 70)
+      field(:on_exhausted, :string, default: "warn")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :max_tokens_per_issue,
+          :max_tokens_per_day,
+          :max_active_seconds_per_issue,
+          :warn_at_percent,
+          :on_exhausted
+        ],
+        empty_values: []
+      )
+      |> validate_number(:max_tokens_per_issue, greater_than: 0)
+      |> validate_number(:max_tokens_per_day, greater_than: 0)
+      |> validate_number(:max_active_seconds_per_issue, greater_than: 0)
+      |> validate_number(:warn_at_percent, greater_than: 0, less_than_or_equal_to: 100)
+      |> validate_inclusion(:on_exhausted, ["warn", "block", "wait"])
+    end
+  end
+
+  defmodule GoalPolicy do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:require_goal_version, :boolean, default: true)
+      field(:require_active_stage, :boolean, default: true)
+      field(:enforce_single_in_progress, :boolean, default: true)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      cast(
+        schema,
+        attrs,
+        [:enabled, :require_goal_version, :require_active_stage, :enforce_single_in_progress],
+        empty_values: []
+      )
+    end
+  end
+
   defmodule Review do
     @moduledoc false
     use Ecto.Schema
@@ -176,6 +311,58 @@ defmodule SymphonyElixir.Config.Schema do
     defp require_enabled_fields(changeset) do
       if get_field(changeset, :enabled) do
         validate_required(changeset, [:issue_identifier, :reviewer])
+      else
+        changeset
+      end
+    end
+  end
+
+  defmodule Memory do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:onyx_api_url, :string, default: "http://127.0.0.1:8780")
+      field(:onyx_api_key, :string)
+      field(:project, :string, default: "loophony")
+      field(:search_limit, :integer, default: 12)
+      field(:health_probe_interval_ms, :integer, default: 60_000)
+      field(:failure_threshold, :integer, default: 2)
+      field(:circuit_breaker_ms, :integer, default: 30_000)
+      field(:canary_query, :string, default: "loophony health canary")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :onyx_api_url,
+          :onyx_api_key,
+          :project,
+          :search_limit,
+          :health_probe_interval_ms,
+          :failure_threshold,
+          :circuit_breaker_ms,
+          :canary_query
+        ],
+        empty_values: []
+      )
+      |> validate_number(:search_limit, greater_than: 0, less_than_or_equal_to: 100)
+      |> validate_number(:health_probe_interval_ms, greater_than: 0)
+      |> validate_number(:failure_threshold, greater_than: 0)
+      |> validate_number(:circuit_breaker_ms, greater_than: 0)
+      |> require_enabled_fields()
+    end
+
+    defp require_enabled_fields(changeset) do
+      if get_field(changeset, :enabled) do
+        validate_required(changeset, [:onyx_api_url, :onyx_api_key, :project])
       else
         changeset
       end
@@ -305,14 +492,20 @@ defmodule SymphonyElixir.Config.Schema do
       field(:dashboard_enabled, :boolean, default: true)
       field(:refresh_ms, :integer, default: 1_000)
       field(:render_interval_ms, :integer, default: 16)
+      field(:linear_heartbeat_interval_ms, :integer, default: 0)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:dashboard_enabled, :refresh_ms, :render_interval_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [:dashboard_enabled, :refresh_ms, :render_interval_ms, :linear_heartbeat_interval_ms],
+        empty_values: []
+      )
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:render_interval_ms, greater_than: 0)
+      |> validate_number(:linear_heartbeat_interval_ms, greater_than_or_equal_to: 0)
     end
   end
 
@@ -341,6 +534,12 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:loop, Loop, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:audit, Audit, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:automation, Automation, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:intake, Intake, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:budget, Budget, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:goal_policy, GoalPolicy, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:memory, Memory, on_replace: :update, defaults_to_struct: true)
     embeds_one(:review, Review, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
@@ -435,6 +634,12 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:loop, with: &Loop.changeset/2)
+    |> cast_embed(:audit, with: &Audit.changeset/2)
+    |> cast_embed(:automation, with: &Automation.changeset/2)
+    |> cast_embed(:intake, with: &Intake.changeset/2)
+    |> cast_embed(:budget, with: &Budget.changeset/2)
+    |> cast_embed(:goal_policy, with: &GoalPolicy.changeset/2)
+    |> cast_embed(:memory, with: &Memory.changeset/2)
     |> cast_embed(:review, with: &Review.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
@@ -465,13 +670,51 @@ defmodule SymphonyElixir.Config.Schema do
           |> Path.expand()
     }
 
+    audit = %{
+      settings.audit
+      | database_path:
+          resolve_path_value(
+            settings.audit.database_path,
+            Path.join(workspace.root, "_loop/loophony-audit.sqlite3")
+          )
+          |> Path.expand()
+    }
+
+    automation = %{
+      settings.automation
+      | database_path:
+          resolve_path_value(
+            settings.automation.database_path,
+            Path.join(workspace.root, "_loop/loophony-runtime.sqlite3")
+          )
+          |> Path.expand()
+    }
+
+    memory = %{
+      settings.memory
+      | onyx_api_key:
+          resolve_secret_setting(
+            settings.memory.onyx_api_key,
+            System.get_env("LOOPHONY_MEMORY_ONYX_API_KEY") || System.get_env("ONYX_API_KEY")
+          )
+    }
+
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, loop: loop, codex: codex}
+    %{
+      settings
+      | tracker: tracker,
+        workspace: workspace,
+        loop: loop,
+        audit: audit,
+        automation: automation,
+        memory: memory,
+        codex: codex
+    }
   end
 
   defp normalize_keys(value) when is_map(value) do

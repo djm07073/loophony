@@ -36,6 +36,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  @doc false
+  @spec encode_message_for_test(term()) :: binary()
+  def encode_message_for_test(message), do: encode_message(message)
+
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
@@ -91,6 +95,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
+
+        scoped_tool_executor =
+          scope_tool_executor(tool_executor, %{
+            session_id: session_id,
+            thread_id: thread_id,
+            turn_id: turn_id
+          })
+
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
         emit_message(
@@ -104,7 +116,14 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        case await_turn_completion(
+               port,
+               on_message,
+               scoped_tool_executor,
+               auto_approve_requests,
+               thread_id,
+               turn_id
+             ) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -115,6 +134,11 @@ defmodule SymphonyElixir.Codex.AppServer do
                thread_id: thread_id,
                turn_id: turn_id
              }}
+
+          {:error, {:turn_preempted, request_id} = reason} ->
+            Logger.info("Codex session preempted for #{issue_context(issue)} session_id=#{session_id} request_id=#{request_id}")
+
+            {:error, reason}
 
           {:error, reason} ->
             Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
@@ -326,22 +350,47 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+  defp await_turn_completion(
+         port,
+         on_message,
+         tool_executor,
+         auto_approve_requests,
+         thread_id,
+         turn_id
+       ) do
     receive_loop(
       port,
       on_message,
       Config.settings!().codex.turn_timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests
+      auto_approve_requests,
+      %{thread_id: thread_id, turn_id: turn_id, preempt_request_id: nil}
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(
+         port,
+         on_message,
+         timeout_ms,
+         pending_line,
+         tool_executor,
+         auto_approve_requests,
+         turn_control
+       ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+
+        handle_incoming(
+          port,
+          on_message,
+          complete_line,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests,
+          turn_control
+        )
 
       {^port, {:data, {:noeol, chunk}}} ->
         receive_loop(
@@ -350,48 +399,51 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           pending_line <> to_string(chunk),
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          turn_control
         )
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
+
+      {:operator_preempt, request_id} when is_binary(request_id) ->
+        next_control = request_turn_interrupt(port, on_message, request_id, turn_control)
+
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          pending_line,
+          tool_executor,
+          auto_approve_requests,
+          next_control
+        )
     after
       timeout_ms ->
         {:error, :turn_timeout}
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(
+         port,
+         on_message,
+         data,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests,
+         turn_control
+       ) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
+        complete_turn(port, on_message, payload, payload_string, turn_control)
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_failed,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params")
-        )
-
-        {:error, {:turn_failed, Map.get(payload, "params")}}
+        fail_or_preempt_turn(port, on_message, payload, payload_string, :turn_failed, turn_control)
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_cancelled,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params")
-        )
-
-        {:error, {:turn_cancelled, Map.get(payload, "params")}}
+        fail_or_preempt_turn(port, on_message, payload, payload_string, :turn_cancelled, turn_control)
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
@@ -402,8 +454,11 @@ defmodule SymphonyElixir.Codex.AppServer do
           payload_string,
           method,
           timeout_ms,
-          tool_executor,
-          auto_approve_requests
+          %{
+            tool_executor: tool_executor,
+            auto_approve_requests: auto_approve_requests,
+            turn_control: turn_control
+          }
         )
 
       {:ok, payload} ->
@@ -417,7 +472,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          turn_control
+        )
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -434,8 +497,83 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          turn_control
+        )
     end
+  end
+
+  defp request_turn_interrupt(_port, _on_message, _request_id, %{preempt_request_id: request_id} = control)
+       when is_binary(request_id),
+       do: control
+
+  defp request_turn_interrupt(port, on_message, request_id, control) do
+    send_message(port, %{
+      "id" => "loophony-preempt-#{request_id}",
+      "method" => "turn/interrupt",
+      "params" => %{
+        "threadId" => control.thread_id,
+        "turnId" => control.turn_id
+      }
+    })
+
+    emit_message(
+      on_message,
+      :turn_preempt_requested,
+      %{
+        preempt_request_id: request_id,
+        thread_id: control.thread_id,
+        turn_id: control.turn_id
+      },
+      port_metadata(port, nil)
+    )
+
+    %{control | preempt_request_id: request_id}
+  end
+
+  defp complete_turn(port, on_message, payload, payload_string, turn_control) do
+    case turn_control.preempt_request_id do
+      request_id when is_binary(request_id) ->
+        emit_preempted_turn(on_message, payload, payload_string, port, request_id)
+        {:error, {:turn_preempted, request_id}}
+
+      _other ->
+        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
+        {:ok, :turn_completed}
+    end
+  end
+
+  defp fail_or_preempt_turn(port, on_message, payload, payload_string, event, turn_control) do
+    case turn_control.preempt_request_id do
+      request_id when is_binary(request_id) ->
+        emit_preempted_turn(on_message, payload, payload_string, port, request_id)
+        {:error, {:turn_preempted, request_id}}
+
+      _other ->
+        details = Map.get(payload, "params")
+        emit_turn_event(on_message, event, payload, payload_string, port, details)
+        {:error, {event, details}}
+    end
+  end
+
+  defp emit_preempted_turn(on_message, payload, payload_string, port, request_id) do
+    emit_message(
+      on_message,
+      :turn_preempted,
+      %{
+        payload: payload,
+        raw: payload_string,
+        details: Map.get(payload, "params"),
+        preempt_request_id: request_id
+      },
+      metadata_from_message(port, payload)
+    )
   end
 
   defp emit_turn_event(on_message, event, payload, payload_string, port, payload_details) do
@@ -458,9 +596,11 @@ defmodule SymphonyElixir.Codex.AppServer do
          payload_string,
          method,
          timeout_ms,
-         tool_executor,
-         auto_approve_requests
+         runtime
        ) do
+    tool_executor = runtime.tool_executor
+    auto_approve_requests = runtime.auto_approve_requests
+    turn_control = runtime.turn_control
     metadata = metadata_from_message(port, payload)
 
     case maybe_handle_approval_request(
@@ -484,7 +624,15 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          turn_control
+        )
 
       :approval_required ->
         emit_message(
@@ -518,7 +666,16 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+
+          receive_loop(
+            port,
+            on_message,
+            timeout_ms,
+            "",
+            tool_executor,
+            auto_approve_requests,
+            turn_control
+          )
         end
     end
   end
@@ -1033,6 +1190,13 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp default_on_message(_message), do: :ok
 
+  defp scope_tool_executor(tool_executor, context) when is_function(tool_executor, 3) do
+    fn tool, arguments -> tool_executor.(tool, arguments, context) end
+  end
+
+  defp scope_tool_executor(tool_executor, _context) when is_function(tool_executor, 2),
+    do: tool_executor
+
   defp tool_call_name(params) when is_map(params) do
     case Map.get(params, "tool") || Map.get(params, :tool) || Map.get(params, "name") || Map.get(params, :name) do
       name when is_binary(name) ->
@@ -1055,9 +1219,27 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp tool_call_arguments(_params), do: %{}
 
   defp send_message(port, message) do
-    line = Jason.encode!(message) <> "\n"
+    line = encode_message(message)
     Port.command(port, line)
   end
+
+  defp encode_message(message) do
+    message
+    |> sanitize_json_strings()
+    |> Jason.encode!()
+    |> Kernel.<>("\n")
+  end
+
+  defp sanitize_json_strings(value) when is_binary(value), do: String.replace_invalid(value, "�")
+  defp sanitize_json_strings(value) when is_list(value), do: Enum.map(value, &sanitize_json_strings/1)
+
+  defp sanitize_json_strings(value) when is_map(value) do
+    Map.new(value, fn {key, item} ->
+      {sanitize_json_strings(key), sanitize_json_strings(item)}
+    end)
+  end
+
+  defp sanitize_json_strings(value), do: value
 
   defp needs_input?("mcpServer/elicitation/request", payload) when is_map(payload), do: true
 

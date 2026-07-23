@@ -8,17 +8,29 @@ quant-research worker. The former TypeScript goal loop is not part of this execu
 - Linear Project: immutable big objective and the human-visible system of record.
 - `[Goal]` issue: measurable success criteria. Do not give it the `symphony-quant` label.
 - Child issue: one isolated Codex session and one bounded research/coding objective.
-- Pending queue: maximum one. Running work is separate.
+- Internal pending dispatch window: maximum one. Linear may hold multiple Todo issues; running
+  work is separate and at most one executable issue may be In Progress.
 - Concurrency: one.
+- Model routing: one `gpt-5.6-sol` medium parent owns planning, research decisions, review, and
+  acceptance. Only a bounded source/test implementation is delegated to one
+  `gpt-5.3-codex-spark` medium subagent in the same issue workspace; non-coding issues do not spawn
+  it.
 - Wake-up: a 30-second idle heartbeat/watchdog. Terminal completion triggers an immediate poll, so
   the next issue starts after the prior issue exits rather than waiting for the timer.
 - Terminal decisions: `Done` and `Rejected` are automatic when evidence passes the workflow rules.
   Only `Blocked` waits for a human.
-- Human feedback: asynchronous through Linear/Codex operator input; routine scheduled review does
-  not pause work. Genuine `Blocked` conditions and the SC-06 live-trading decision remain gated.
+- Human feedback: each accepted Linear/Codex operator input creates a visible `[Human]` Todo issue.
+  Loophony selects these tickets by Linear priority and age, creates a linked `[Work]` issue, and
+  runs only the Work issue. Ordinary feedback never disturbs current work. Explicit `preempt` stops
+  the current Codex turn and preserves its workspace before scheduling resumes. Routine scheduled
+  review does not pause work. Genuine `Blocked` conditions and the SC-06 live-trading decision
+  remain gated.
+- Linear record language: Korean for issue titles, descriptions, workpads, progress, validation,
+  outcomes, and handoffs. Exact technical identifiers, paths, commands, and machine markers may
+  remain in their original language.
 - Loop memory: structured `observe → orient → act → verify → learn/handoff` checkpoints are stored
-  in local SQLite. One loop is exactly one Linear child issue, identified by its immutable
-  `issue_id`.
+  in local SQLite and indexed by Onyx v4/OpenSearch 3.6 for cross-session natural-language search.
+  One loop is exactly one Linear child issue, identified by its immutable `issue_id`.
 
 The globally installed Loophony plugin supplies the Codex App operator console. The official
 Alpaca plugin supplies read-only market-data capabilities, and the Linear plugin is available to
@@ -82,14 +94,17 @@ export QUANT_RESEARCH_REPO_URL='git@github.com:your-org/quant-research.git'
 The dashboard is available only on `127.0.0.1:8787`; Linear remains the primary dashboard.
 The installed Loophony plugin uses this loopback endpoint as the Codex App operator console:
 it can read the current report, request an immediate refresh, and persist instructions, goal
-adjustments, or unblock decisions as Linear comments. A running turn consumes input at its next
-safe continuation checkpoint; it is not interrupted mid-command. `unblock` additionally returns the
-target issue to `Ready`.
+adjustments, preemption requests, or unblock decisions as prioritized `[Human]` Linear issues.
+Loophony claims the highest-priority oldest Human issue, creates or recovers its linked `[Work]`
+issue, and lets the normal scheduler execute that Work issue. Explicit `preempt` additionally uses
+Codex `turn/interrupt` and preserves the workspace; a 30-second timeout falls back to restarting
+only the worker. `unblock` additionally returns the target issue to `Ready`.
 
 This autonomous profile disables scheduled review gates. Inspect Linear whenever convenient and use
-operator `instruction` or `goal_adjustment` input for asynchronous feedback; an active command is
-not interrupted and consumes the input at its next safe checkpoint. A true `Blocked` state still
-requires explicit unblock input, and SC-06 still requires explicit live-trading approval.
+operator `instruction` or `goal_adjustment` input to create queued Human tickets. Use `preempt` only
+for an explicit request to stop or replace active work now; status questions and RAG searches never
+change execution. A true `Blocked` state still requires explicit unblock input, and SC-06 still
+requires explicit live-trading approval.
 
 ## Loop engineering and local state
 
@@ -115,6 +130,15 @@ The JSON status API and Codex App report expose the checkpoint count, outcome to
 loop decisions. If the database is temporarily unavailable, the status report marks loop memory
 unavailable. When scheduled review is explicitly enabled, dispatch fails closed because Symphony cannot safely
 prove that the human gate was resolved.
+
+The `loophony-query` skill searches Onyx's OpenSearch keyword/vector index, expands the strongest
+matching session when needed, and lets Codex write the final answer with exact
+issue/session/evidence citations. Onyx's local model servers run multilingual E5 embeddings; the
+retrieval path makes no generative-LLM call, and Codex remains the answering agent.
+Successful tracker reads also upsert a stable current Linear issue snapshot. At turn completion,
+Loophony adds a deterministic session summary built from same-session checkpoints and recent final
+agent messages. The query skill uses that summary to navigate but verifies progress claims against
+live state and the separately retained raw evidence.
 
 When enabled for another profile, the scheduled review gate is orchestration state, not another
 research loop. It does not merge SQLite checkpoints between issues. This autonomous profile instead

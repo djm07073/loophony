@@ -1,4 +1,4 @@
 interface:
   display_name: "Loophony Control"
   short_description: "Monitor and steer the local Loophony daemon"
-  default_prompt: "Use $loophony-control to show my Loophony status and pending human decisions."
+  default_prompt: "Use $loophony-control to show my Loophony status, create prioritized Human feedback tickets, or safely preempt active work when I explicitly ask."

@@ -4,11 +4,13 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8787";
 const CONTROL_HEADER = "x-loophony-control";
 const CONTROL_HEADER_VALUE = "codex-app";
 
-export type LoophonyInputKind = "instruction" | "goal_adjustment" | "unblock";
+export type LoophonyInputKind = "instruction" | "goal_adjustment" | "preempt" | "unblock";
 
 export interface LoophonyOperatorInput {
   kind: LoophonyInputKind;
   message: string;
+  title?: string | undefined;
+  priority?: 0 | 1 | 2 | 3 | 4 | undefined;
   issueIdentifier?: string | undefined;
   resumeState?: string | undefined;
   requestId?: string | undefined;
@@ -17,6 +19,34 @@ export interface LoophonyOperatorInput {
 export interface LoophonyReviewDecision {
   decision: "maintain" | "adjust";
   feedback: string;
+}
+
+export interface LoophonyMemorySearch {
+  query: string;
+  issueIdentifier?: string | undefined;
+  sessionId?: string | undefined;
+  sourceTypes?:
+    | Array<
+        | "linear_project"
+        | "linear_issue"
+        | "session_summary"
+        | "checkpoint"
+        | "agent_final"
+        | "error"
+        | "session_event"
+      >
+    | undefined;
+  from?: string | undefined;
+  to?: string | undefined;
+  limit?: number | undefined;
+}
+
+export interface LoophonyAuditQuery {
+  resourceType?: string | undefined;
+  resourceId?: string | undefined;
+  action?: string | undefined;
+  outcome?: string | undefined;
+  limit?: number | undefined;
 }
 
 export class LoophonyClient {
@@ -36,6 +66,67 @@ export class LoophonyClient {
     return this.request(path, { method: "GET" });
   }
 
+  async getMemoryStatus(): Promise<unknown> {
+    return this.request("/api/v1/memory/status", { method: "GET" });
+  }
+
+  async searchMemory(input: LoophonyMemorySearch): Promise<unknown> {
+    const payload: Record<string, unknown> = { query: input.query };
+    if (input.issueIdentifier) payload.issue_identifier = input.issueIdentifier;
+    if (input.sessionId) payload.session_id = input.sessionId;
+    if (input.sourceTypes) payload.source_types = input.sourceTypes;
+    if (input.from) payload.from = input.from;
+    if (input.to) payload.to = input.to;
+    if (input.limit) payload.limit = input.limit;
+
+    return this.request("/api/v1/memory/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getMemorySession(sessionId: string): Promise<unknown> {
+    return this.request(`/api/v1/memory/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "GET",
+    });
+  }
+
+  async getAuditLog(input: LoophonyAuditQuery = {}): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (input.resourceType) params.set("resource_type", input.resourceType);
+    if (input.resourceId) params.set("resource_id", input.resourceId);
+    if (input.action) params.set("action", input.action);
+    if (input.outcome) params.set("outcome", input.outcome);
+    if (input.limit) params.set("limit", String(input.limit));
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request(`/api/v1/audit${query}`, { method: "GET" });
+  }
+
+  async verifyAuditLog(): Promise<unknown> {
+    return this.request("/api/v1/audit/verify", { method: "GET" });
+  }
+
+  async getJobs(issueId?: string, status?: string): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (issueId) params.set("issue_id", issueId);
+    if (status) params.set("status", status);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return this.request(`/api/v1/jobs${query}`, { method: "GET" });
+  }
+
+  async stopJob(jobId: string): Promise<unknown> {
+    return this.request(`/api/v1/jobs/${encodeURIComponent(jobId)}/stop`, {
+      method: "POST",
+      headers: controlHeaders(),
+      body: "{}",
+    });
+  }
+
+  async getWaits(): Promise<unknown> {
+    return this.request("/api/v1/waits", { method: "GET" });
+  }
+
   async refresh(): Promise<unknown> {
     return this.request("/api/v1/refresh", {
       method: "POST",
@@ -45,11 +136,13 @@ export class LoophonyClient {
   }
 
   async submitInput(input: LoophonyOperatorInput): Promise<unknown> {
-    const payload: Record<string, string> = {
+    const payload: Record<string, unknown> = {
       kind: input.kind,
       message: input.message,
       request_id: input.requestId ?? randomUUID(),
     };
+    if (input.title) payload.title = input.title;
+    if (input.priority !== undefined) payload.priority = input.priority;
     if (input.issueIdentifier) payload.issue_identifier = input.issueIdentifier;
     if (input.resumeState) payload.resume_state = input.resumeState;
 

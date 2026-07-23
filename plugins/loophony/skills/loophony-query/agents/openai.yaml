@@ -1,0 +1,4 @@
+interface:
+  display_name: "Loophony Query"
+  short_description: "Summarize indexed loop progress"
+  default_prompt: "Use $loophony-query to answer my question from current Loophony state and indexed cross-session evidence."

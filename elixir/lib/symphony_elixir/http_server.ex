@@ -25,14 +25,15 @@ defmodule SymphonyElixir.HttpServer do
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
         with {:ok, ip} <- parse_host(host) do
-          endpoint_opts = [
-            server: true,
-            http: [ip: ip, port: port],
-            url: [host: normalize_host(host)],
-            orchestrator: orchestrator,
-            snapshot_timeout_ms: snapshot_timeout_ms,
-            secret_key_base: secret_key_base()
-          ]
+          endpoint_opts =
+            [
+              server: true,
+              http: [ip: ip, port: port],
+              url: [host: normalize_host(host)],
+              orchestrator: orchestrator,
+              snapshot_timeout_ms: snapshot_timeout_ms,
+              secret_key_base: secret_key_base()
+            ] ++ Keyword.take(opts, [:memory_store, :audit_log, :runtime_store, :job_supervisor])
 
           endpoint_config =
             :symphony_elixir

@@ -51,6 +51,27 @@ defmodule SymphonyElixir.Tracker.Memory do
     end
   end
 
+  @spec create_issue(map()) :: {:ok, Issue.t()} | {:error, term()}
+  def create_issue(attributes) when is_map(attributes) do
+    source_issue_id = value(attributes, :source_issue_id)
+    source = Enum.find(issue_entries(), &(&1.id == source_issue_id))
+
+    if match?(%Issue{}, source) do
+      issue = build_issue(source, attributes)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, issue_entries() ++ [issue])
+      send_event({:memory_tracker_issue_created, issue})
+      {:ok, issue}
+    else
+      {:error, :issue_creation_context_not_found}
+    end
+  end
+
+  @spec create_issue_relation(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def create_issue_relation(issue_id, related_issue_id, relation_type) do
+    send_event({:memory_tracker_issue_relation, issue_id, related_issue_id, relation_type})
+    :ok
+  end
+
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
     send_event({:memory_tracker_comment, issue_id, body})
@@ -59,8 +80,38 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
+    updated =
+      Enum.map(issue_entries(), fn
+        %Issue{id: ^issue_id} = issue -> %{issue | state: state_name}
+        issue -> issue
+      end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, updated)
     send_event({:memory_tracker_state_update, issue_id, state_name})
     :ok
+  end
+
+  defp build_issue(source, attributes) do
+    suffix = System.unique_integer([:positive, :monotonic])
+
+    %Issue{
+      id: "memory-issue-#{suffix}",
+      identifier: "MEM-#{suffix}",
+      title: value(attributes, :title),
+      description: value(attributes, :description),
+      project_id: source.project_id,
+      project_name: source.project_name,
+      project_slug: source.project_slug,
+      project_description: source.project_description,
+      project_url: source.project_url,
+      project_updated_at: source.project_updated_at,
+      priority: value(attributes, :priority),
+      state: value(attributes, :state_name),
+      assignee_id: source.assignee_id,
+      labels: source.labels,
+      created_at: DateTime.utc_now(),
+      updated_at: DateTime.utc_now()
+    }
   end
 
   defp configured_issues do
@@ -85,4 +136,6 @@ defmodule SymphonyElixir.Tracker.Memory do
   end
 
   defp normalize_state(_state), do: ""
+
+  defp value(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 end

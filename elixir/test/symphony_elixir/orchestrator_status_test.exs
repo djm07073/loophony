@@ -52,11 +52,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     assert_receive {:memory_tracker_comment, "review-issue", report}, 2_000
-    assert report =~ "Scheduled Goal Review"
+    assert report =~ "정기 목표 검토"
     assert report =~ "@owner"
     assert report =~ "QNT-10"
 
-    snapshot = wait_for_snapshot(pid, &match?(%{review_gate: %{status: "open"}}, &1))
+    snapshot =
+      wait_for_snapshot(pid, fn snapshot ->
+        match?(%{review_gate: %{status: "open"}}, snapshot) and
+          Enum.map(snapshot.queued, & &1.identifier) == ["QNT-10"]
+      end)
+
     assert snapshot.running == []
     assert Enum.map(snapshot.queued, & &1.identifier) == ["QNT-10"]
 
@@ -109,8 +114,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              )
 
     assert decision.gate.status == "resolved"
-    assert_receive {:memory_tracker_comment, "review-issue", decision_comment}
-    assert decision_comment =~ "Goal Review Decision"
+    decision_comment = receive_memory_comment_containing("review-issue", "목표 검토 결정")
+    assert decision_comment =~ "목표 검토 결정"
 
     resumed =
       wait_for_snapshot(pid, fn snapshot ->
@@ -1091,6 +1096,78 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert remaining_ms <= 10_500
   end
 
+  test "orchestrator appends timestamped Linear health heartbeats without editing prior comments" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: [],
+      tracker_active_states: ["In Progress"],
+      poll_interval_ms: 60_000,
+      codex_stall_timeout_ms: 600_000,
+      observability_linear_heartbeat_interval_ms: 60_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :LinearHealthHeartbeatOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    Process.sleep(100)
+
+    issue = %Issue{
+      id: "issue-health",
+      identifier: "HFT-HEALTH",
+      title: "Observe worker health",
+      state: "In Progress",
+      labels: []
+    }
+
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+    observed_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "health-session",
+      last_codex_message: nil,
+      last_codex_timestamp: observed_at,
+      last_codex_event: :notification,
+      started_at: observed_at
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    :sys.replace_state(pid, fn _state ->
+      %{
+        initial_state
+        | running: %{issue.id => running_entry},
+          claimed: MapSet.put(initial_state.claimed, issue.id)
+      }
+    end)
+
+    send(pid, :run_poll_cycle)
+
+    assert_receive {:memory_tracker_comment, "issue-health", heartbeat}, 2_000
+    assert heartbeat =~ "## Loophony Health"
+    assert heartbeat =~ "확인 시각 (UTC)"
+    assert heartbeat =~ "확인 시각 (KST)"
+    assert heartbeat =~ "마지막 event (UTC)"
+    assert heartbeat =~ "silent-stall 자동 재시작 기준: `600`초"
+    assert heartbeat =~ "worker process: `alive`"
+    assert heartbeat =~ "session: `health-session`"
+
+    send(pid, :run_poll_cycle)
+    refute_receive {:memory_tracker_comment, "issue-health", _duplicate}, 200
+    Process.exit(worker_pid, :kill)
+  end
+
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1239,7 +1316,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
 
     assert_receive {:memory_tracker_comment, ^issue_id, alert}
-    assert alert =~ "Loophony Blocked — Human Input Required"
+    assert alert =~ "Loophony Blocked — 사람 입력 필요"
     assert alert =~ "@owner"
     assert alert =~ "MT-INPUT"
     assert alert =~ "codex turn requires operator input"
@@ -1889,6 +1966,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp receive_memory_comment_containing(issue_id, pattern, attempts \\ 5)
+
+  defp receive_memory_comment_containing(issue_id, pattern, attempts) when attempts > 0 do
+    receive do
+      {:memory_tracker_comment, ^issue_id, body} ->
+        if body =~ pattern,
+          do: body,
+          else: receive_memory_comment_containing(issue_id, pattern, attempts - 1)
+    after
+      1_000 -> flunk("timed out waiting for memory tracker comment containing #{inspect(pattern)}")
+    end
+  end
+
+  defp receive_memory_comment_containing(_issue_id, pattern, 0) do
+    flunk("memory tracker comments did not contain #{inspect(pattern)}")
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do

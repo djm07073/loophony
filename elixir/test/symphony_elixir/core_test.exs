@@ -24,6 +24,10 @@ defmodule SymphonyElixir.CoreTest do
     assert config.review.enabled == false
     assert config.review.timezone == "Asia/Seoul"
     assert config.review.times == ["10:00", "22:00"]
+    assert config.intake.enabled == false
+    assert config.intake.todo_state == "Todo"
+    assert config.intake.max_claims_per_poll == 1
+    assert config.goal_policy.enforce_single_in_progress
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -163,6 +167,26 @@ defmodule SymphonyElixir.CoreTest do
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() == prompt
+  end
+
+  test "bundled workflows route bounded coding to Spark and keep acceptance with Sol" do
+    workflow_paths = [
+      Path.expand("../../WORKFLOW.md", __DIR__),
+      Path.expand("../../../quant/WORKFLOW.md", __DIR__)
+    ]
+
+    for workflow_path <- workflow_paths do
+      workflow = File.read!(workflow_path)
+
+      assert workflow =~ ~s(model="gpt-5.6-sol")
+      assert workflow =~ "model_reasoning_effort=medium"
+      assert workflow =~ ~s(agents.default_subagent_model="gpt-5.3-codex-spark")
+      assert workflow =~ "agents.default_subagent_reasoning_effort=high"
+      assert workflow =~ "requires source-code or test-file edits"
+      assert workflow =~ ~r/exactly one\s+(?:coding )?subagent/
+      assert workflow =~ "parent"
+      assert workflow =~ "validation"
+    end
   end
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
@@ -710,6 +734,290 @@ defmodule SymphonyElixir.CoreTest do
     assert updated_state.next_poll_due_at_ms <= System.monotonic_time(:millisecond) + 50
 
     Process.cancel_timer(updated_state.tick_timer_ref)
+  end
+
+  test "terminal handoff requires a verified successor candidate" do
+    current = %Issue{id: "current", identifier: "MT-600", state: "Done"}
+    successor = %Issue{id: "successor", identifier: "MT-601", state: "Todo"}
+    handoff = %{phase: "handoff", outcome: "rejected", next_action: "next_candidate=MT-601"}
+
+    refute AgentRunner.terminal_handoff_ready_for_test(current, [], [handoff])
+    assert AgentRunner.terminal_handoff_ready_for_test(current, [successor], [handoff])
+  end
+
+  test "terminal handoff permits an explicit root termination reason" do
+    current = %Issue{id: "current", identifier: "MT-602", state: "Done"}
+    handoff = %{phase: "handoff", outcome: "done", next_action: "termination_reason=root_goal_proven"}
+
+    assert AgentRunner.terminal_handoff_ready_for_test(current, [], [handoff])
+  end
+
+  test "terminal handoff rejects nonterminal checkpoints even with a candidate" do
+    current = %Issue{id: "current", identifier: "MT-603", state: "Done"}
+    successor = %Issue{id: "successor", identifier: "MT-604", state: "Todo"}
+    checkpoint = %{phase: "verify", outcome: "rejected", next_action: "next_candidate=MT-604"}
+
+    refute AgentRunner.terminal_handoff_ready_for_test(current, [successor], [checkpoint])
+  end
+
+  test "three consecutive blocked checkpoints stop max-turn redispatch" do
+    checkpoints = [
+      %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"},
+      %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"},
+      %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"}
+    ]
+
+    assert %{count: 3, decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"} =
+             AgentRunner.repeated_blocker_for_test(checkpoints)
+
+    refute AgentRunner.repeated_blocker_for_test(Enum.take(checkpoints, 2))
+
+    refute AgentRunner.repeated_blocker_for_test([
+             %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"},
+             %{outcome: "continue"},
+             %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"},
+             %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"}
+           ])
+
+    refute AgentRunner.repeated_blocker_for_test([
+             %{outcome: "blocked", decision: "FIRST_BLOCKER"},
+             %{outcome: "blocked", decision: "SECOND_BLOCKER"},
+             %{outcome: "blocked", decision: "FIRST_BLOCKER"}
+           ])
+
+    assert %{count: 3} =
+             AgentRunner.repeated_blocker_for_test([
+               %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING 최종 유지"},
+               %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING 유지"},
+               %{outcome: "blocked", decision: "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"}
+             ])
+  end
+
+  test "orchestrator records a worker-reported repeated blocker before normal exit" do
+    issue = %Issue{id: "blocked-issue", identifier: "MT-605", state: "In Progress"}
+
+    state = %Orchestrator.State{
+      running: %{
+        issue.id => %{
+          issue: issue,
+          identifier: issue.identifier
+        }
+      }
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info(
+               {:worker_blocked, issue.id, "AUTHENTICATED_STREAM_ENTITLEMENT_MISSING"},
+               state
+             )
+
+    assert %{completion: %{outcome: :input_required}} = updated_state.running[issue.id]
+
+    assert {:noreply, ^updated_state} =
+             Orchestrator.handle_info({:worker_blocked, "missing", "reason"}, updated_state)
+  end
+
+  test "explicit unblock releases a runtime block even when Linear state is unchanged" do
+    issue = %Issue{id: "blocked-same-state", identifier: "MT-606", state: "In Progress"}
+
+    state = %Orchestrator.State{
+      blocked: %{
+        issue.id => %{
+          issue: issue,
+          identifier: issue.identifier,
+          block_type: :runtime
+        }
+      }
+    }
+
+    issue_id = issue.id
+
+    assert {:reply, %{released: true, issue_id: ^issue_id}, updated_state} =
+             Orchestrator.handle_call({:resume_issue, issue.id}, {self(), make_ref()}, state)
+
+    assert updated_state.blocked == %{}
+    assert is_reference(updated_state.tick_timer_ref)
+    Process.cancel_timer(updated_state.tick_timer_ref)
+  end
+
+  test "operator preemption interrupts the worker and falls back to a preserved-workspace retry" do
+    issue = %Issue{
+      id: "preempt-issue",
+      identifier: "MT-607",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-607"
+    }
+
+    test_pid = self()
+
+    {:ok, worker_pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        receive do
+          message ->
+            send(test_pid, {:worker_message, message})
+            Process.sleep(:infinity)
+        end
+      end)
+
+    ref = Process.monitor(worker_pid)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue.id => %{
+          pid: worker_pid,
+          ref: ref,
+          issue: issue,
+          identifier: issue.identifier,
+          worker_host: nil,
+          workspace_path: "/tmp/MT-607",
+          session_id: "thread-607-turn-607",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 0
+        }
+      },
+      claimed: MapSet.new([issue.id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:reply, preemption, preempting_state} =
+             Orchestrator.handle_call(
+               {:preempt_issue, issue.id, "request-607"},
+               {self(), make_ref()},
+               state
+             )
+
+    assert preemption.status == "interrupt_requested"
+    assert preemption.delivery == "turn_interrupt"
+    assert preemption.grace_timeout_ms == 30_000
+    assert_receive {:worker_message, {:operator_preempt, "request-607"}}
+    assert preempting_state.running[issue.id].preempt_request_id == "request-607"
+
+    Process.cancel_timer(preempting_state.running[issue.id].preempt_timer_ref)
+
+    assert {:noreply, restarted_state} =
+             Orchestrator.handle_info(
+               {:force_operator_preempt, issue.id, "request-607"},
+               preempting_state
+             )
+
+    assert restarted_state.running == %{}
+
+    assert %{attempt: 1, error: error, workspace_path: "/tmp/MT-607"} =
+             restarted_state.retry_attempts[issue.id]
+
+    assert error =~ "operator preempted the active run"
+    Process.cancel_timer(restarted_state.retry_attempts[issue.id].timer_ref)
+  end
+
+  test "operator preemption with Human intake returns control to priority scheduling" do
+    write_workflow_file!(Workflow.workflow_file_path(), intake_enabled: true)
+
+    issue = %Issue{
+      id: "preempt-human-intake",
+      identifier: "MT-608",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-608"
+    }
+
+    {:ok, worker_pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        Process.sleep(:infinity)
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue.id => %{
+          pid: worker_pid,
+          ref: Process.monitor(worker_pid),
+          issue: issue,
+          identifier: issue.identifier,
+          workspace_path: "/tmp/MT-608",
+          session_id: "thread-608-turn-608",
+          started_at: DateTime.utc_now(),
+          retry_attempt: 0
+        }
+      },
+      claimed: MapSet.new([issue.id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:reply, _preemption, preempting_state} =
+             Orchestrator.handle_call(
+               {:preempt_issue, issue.id, "request-608"},
+               {self(), make_ref()},
+               state
+             )
+
+    Process.cancel_timer(preempting_state.running[issue.id].preempt_timer_ref)
+
+    assert {:noreply, scheduled_state} =
+             Orchestrator.handle_info(
+               {:force_operator_preempt, issue.id, "request-608"},
+               preempting_state
+             )
+
+    assert scheduled_state.running == %{}
+    assert scheduled_state.retry_attempts == %{}
+    refute MapSet.member?(scheduled_state.claimed, issue.id)
+    assert is_reference(scheduled_state.tick_timer_ref)
+    Process.cancel_timer(scheduled_state.tick_timer_ref)
+  end
+
+  test "warning-only budget exhaustion keeps the active issue running and posts one notice" do
+    issue = %Issue{
+      id: "budget-warning-issue",
+      identifier: "MT-BUDGET-WARN",
+      state: "In Progress"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      review_reviewer: "@owner"
+    )
+
+    running_entry = %{
+      identifier: issue.identifier,
+      issue: issue,
+      started_at: DateTime.utc_now()
+    }
+
+    state = %Orchestrator.State{
+      running: %{issue.id => running_entry},
+      claimed: MapSet.new([issue.id])
+    }
+
+    evaluation = %{
+      status: "exhausted",
+      action: "warn",
+      exhausted_reasons: ["issue_tokens"],
+      metrics: %{
+        issue_tokens: %{used: 101, limit: 100, percent: 101, exhausted: true},
+        daily_tokens: %{used: 101, limit: 1_000, percent: 10, exhausted: false},
+        issue_runtime_seconds: %{used: 10, limit: 100, percent: 10, exhausted: false}
+      },
+      usage: %{issue: %{exhausted_at: nil}}
+    }
+
+    next_state =
+      Orchestrator.apply_budget_evaluation_for_test(
+        state,
+        issue.id,
+        running_entry,
+        evaluation
+      )
+
+    assert Map.has_key?(next_state.running, issue.id)
+    assert next_state.blocked == %{}
+
+    assert_receive {:memory_tracker_comment, "budget-warning-issue", warning}
+    assert warning =~ "Loophony Budget Warning — 작업 계속"
+    assert warning =~ "@owner"
+    assert warning =~ "101 / 100 (101%)"
+    assert warning =~ "작업을 중단하지 않고 계속합니다"
+    refute warning =~ "unblock"
   end
 
   test "agent runner does not continue after a required label is removed" do
@@ -1369,7 +1677,20 @@ defmodule SymphonyElixir.CoreTest do
                AgentRunner.run(
                  issue,
                  test_pid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end,
+                 candidate_fetcher: fn ->
+                   {:ok, [%Issue{id: "issue-live-updates-successor", state: "Todo"}]}
+                 end,
+                 checkpoint_fetcher: fn _issue_id ->
+                   {:ok,
+                    [
+                      %{
+                        phase: "handoff",
+                        outcome: "done",
+                        next_action: "next_candidate=MT-100"
+                      }
+                    ]}
+                 end
                )
 
       assert_receive {:codex_worker_update, "issue-live-updates",
@@ -1572,7 +1893,24 @@ defmodule SymphonyElixir.CoreTest do
                  1
                )
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 issue_state_fetcher: state_fetcher,
+                 candidate_fetcher: fn ->
+                   {:ok, [%Issue{id: "issue-continue-successor", state: "Todo"}]}
+                 end,
+                 checkpoint_fetcher: fn _issue_id ->
+                   {:ok,
+                    [
+                      %{
+                        phase: "handoff",
+                        outcome: "done",
+                        next_action: "next_candidate=MT-248"
+                      }
+                    ]}
+                 end
+               )
+
       assert_receive {:issue_state_fetch, 1}
       assert_receive {:issue_state_fetch, 2}
 
@@ -1599,6 +1937,7 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
+      assert Enum.at(turn_texts, 1) =~ "Linear issue title, description, workpad entry"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)

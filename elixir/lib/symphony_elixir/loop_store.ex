@@ -13,7 +13,7 @@ defmodule SymphonyElixir.LoopStore do
   alias SymphonyElixir.{Config, Linear.Issue}
 
   @phases ~w(observe orient act verify learn handoff)
-  @outcomes ~w(continue done rejected blocked retry)
+  @outcomes ~w(continue waiting done rejected blocked retry)
   @alignments ~w(aligned adjusted rejected)
   @max_text_bytes 8_000
   @max_evidence_items 50
@@ -29,6 +29,9 @@ defmodule SymphonyElixir.LoopStore do
     issue_identifier TEXT NOT NULL,
     checkpoint_key TEXT NOT NULL,
     turn_number INTEGER NOT NULL,
+    session_id TEXT,
+    thread_id TEXT,
+    turn_id TEXT,
     phase TEXT NOT NULL,
     goal_alignment TEXT,
     summary TEXT NOT NULL,
@@ -60,12 +63,15 @@ defmodule SymphonyElixir.LoopStore do
 
   @insert_checkpoint """
   INSERT INTO loop_checkpoints (
-    issue_id, issue_identifier, checkpoint_key, turn_number, phase, goal_alignment,
-    summary, decision, evidence_json, next_action, outcome, recorded_at
-  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+    issue_id, issue_identifier, checkpoint_key, turn_number, session_id, thread_id, turn_id,
+    phase, goal_alignment, summary, decision, evidence_json, next_action, outcome, recorded_at
+  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
   ON CONFLICT(issue_id, checkpoint_key) DO UPDATE SET
     issue_identifier = excluded.issue_identifier,
     turn_number = excluded.turn_number,
+    session_id = coalesce(excluded.session_id, loop_checkpoints.session_id),
+    thread_id = coalesce(excluded.thread_id, loop_checkpoints.thread_id),
+    turn_id = coalesce(excluded.turn_id, loop_checkpoints.turn_id),
     phase = excluded.phase,
     goal_alignment = excluded.goal_alignment,
     summary = excluded.summary,
@@ -77,8 +83,8 @@ defmodule SymphonyElixir.LoopStore do
   """
 
   @select_columns """
-  id, issue_id, issue_identifier, checkpoint_key, turn_number, phase, goal_alignment,
-  summary, decision, evidence_json, next_action, outcome, recorded_at
+  id, issue_id, issue_identifier, checkpoint_key, turn_number, session_id, thread_id, turn_id,
+  phase, goal_alignment, summary, decision, evidence_json, next_action, outcome, recorded_at
   """
 
   @review_select_columns """
@@ -96,6 +102,9 @@ defmodule SymphonyElixir.LoopStore do
           issue_identifier: String.t(),
           checkpoint_key: String.t(),
           turn_number: pos_integer(),
+          session_id: String.t() | nil,
+          thread_id: String.t() | nil,
+          turn_id: String.t() | nil,
           phase: String.t(),
           goal_alignment: String.t() | nil,
           summary: String.t(),
@@ -154,6 +163,12 @@ defmodule SymphonyElixir.LoopStore do
       {:error, :invalid_limit}
     end
   end
+
+  @spec all_checkpoints() :: {:ok, [checkpoint()]} | {:error, term()}
+  def all_checkpoints, do: all_checkpoints(__MODULE__)
+
+  @spec all_checkpoints(GenServer.server()) :: {:ok, [checkpoint()]} | {:error, term()}
+  def all_checkpoints(server), do: call(server, :all_checkpoints)
 
   @spec summary() :: map()
   def summary, do: summary(__MODULE__)
@@ -311,6 +326,20 @@ defmodule SymphonyElixir.LoopStore do
     end
   end
 
+  def handle_call(:all_checkpoints, _from, state) do
+    with {:ok, state} <- ensure_connection(state),
+         {:ok, rows} <-
+           query_rows(
+             state.connection,
+             "SELECT #{@select_columns} FROM loop_checkpoints ORDER BY recorded_at ASC, id ASC",
+             []
+           ) do
+      {:reply, {:ok, Enum.map(rows, &decode_checkpoint/1)}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:summary, limit}, _from, state) do
     with {:ok, state} <- ensure_connection(state),
          {:ok, [[total]]} <- query_rows(state.connection, "SELECT COUNT(*) FROM loop_checkpoints", []),
@@ -436,6 +465,9 @@ defmodule SymphonyElixir.LoopStore do
          issue_identifier: identifier,
          checkpoint_key: checkpoint_key,
          turn_number: turn_number,
+         session_id: optional_text(attributes, "session_id"),
+         thread_id: optional_text(attributes, "thread_id"),
+         turn_id: optional_text(attributes, "turn_id"),
          phase: phase,
          goal_alignment: alignment,
          summary: summary,
@@ -488,6 +520,13 @@ defmodule SymphonyElixir.LoopStore do
     end
   end
 
+  defp optional_text(attributes, key) do
+    case attribute(attributes, key) do
+      value when is_binary(value) -> if String.trim(value) == "", do: nil, else: String.trim(value)
+      _ -> nil
+    end
+  end
+
   defp evidence_list(attributes) do
     case attribute(attributes, "evidence") do
       evidence when is_list(evidence) and length(evidence) <= @max_evidence_items ->
@@ -536,7 +575,8 @@ defmodule SymphonyElixir.LoopStore do
   defp open_connection(path, state) when is_binary(path) do
     with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, connection} <- Sqlite3.open(path),
-         :ok <- Sqlite3.execute(connection, @schema) do
+         :ok <- Sqlite3.execute(connection, @schema),
+         :ok <- ensure_checkpoint_session_columns(connection) do
       {:ok, %{state | connection: connection, path: path}}
     end
   end
@@ -547,6 +587,9 @@ defmodule SymphonyElixir.LoopStore do
       checkpoint.issue_identifier,
       checkpoint.checkpoint_key,
       checkpoint.turn_number,
+      checkpoint.session_id,
+      checkpoint.thread_id,
+      checkpoint.turn_id,
       checkpoint.phase,
       checkpoint.goal_alignment,
       checkpoint.summary,
@@ -682,6 +725,9 @@ defmodule SymphonyElixir.LoopStore do
          issue_identifier,
          checkpoint_key,
          turn_number,
+         session_id,
+         thread_id,
+         turn_id,
          phase,
          goal_alignment,
          summary,
@@ -697,6 +743,9 @@ defmodule SymphonyElixir.LoopStore do
       issue_identifier: issue_identifier,
       checkpoint_key: checkpoint_key,
       turn_number: turn_number,
+      session_id: session_id,
+      thread_id: thread_id,
+      turn_id: turn_id,
       phase: phase,
       goal_alignment: goal_alignment,
       summary: summary,
@@ -735,6 +784,24 @@ defmodule SymphonyElixir.LoopStore do
       {:ok, evidence} when is_list(evidence) -> evidence
       _ -> []
     end
+  end
+
+  defp ensure_checkpoint_session_columns(connection) do
+    with {:ok, rows} <- query_rows(connection, "PRAGMA table_info(loop_checkpoints)", []) do
+      existing = MapSet.new(rows, &Enum.at(&1, 1))
+      add_missing_checkpoint_columns(connection, existing)
+    end
+  end
+
+  defp add_missing_checkpoint_columns(connection, existing) do
+    ["session_id", "thread_id", "turn_id"]
+    |> Enum.reject(&MapSet.member?(existing, &1))
+    |> Enum.reduce_while(:ok, fn column, :ok ->
+      case Sqlite3.execute(connection, "ALTER TABLE loop_checkpoints ADD COLUMN #{column} TEXT") do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp close_connection(nil), do: :ok

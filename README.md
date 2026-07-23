@@ -3,8 +3,8 @@
 Loophony is a small, Linear-driven 24/7 agent orchestrator built on
 [OpenAI Symphony](https://github.com/openai/symphony). You define one durable objective on a
 Linear project, and Loophony repeatedly gives Codex one bounded Linear issue at a time. Linear is
-the human-facing control plane; local SQLite, repository artifacts, and git history preserve the
-execution trail between fresh Codex sessions.
+the human-facing control plane; local SQLite preserves issue checkpoints, while optional Onyx v4
+and OpenSearch 3.6 hybrid search let Codex answer natural-language questions across sessions.
 
 > [!WARNING]
 > Loophony is an experimental preview for trusted local environments. It never enables live
@@ -15,8 +15,10 @@ execution trail between fresh Codex sessions.
 - One Loophony loop equals one Linear issue and one fresh Codex execution session.
 - A completed loop immediately hands off to the next eligible issue; the 30-second idle heartbeat
   only discovers externally created work and reconciles missed state changes.
-- Exactly one top-level Codex worker session and one pending issue are allowed globally. A worker
-  may still use subsessions or subagents inside that single top-level session.
+- Exactly one top-level Codex worker session and one internal pending dispatch slot are allowed
+  globally. Linear may contain multiple aligned `Todo` issues, but only one executable issue may
+  be `In Progress`. A worker may still use subsessions or subagents inside that single top-level
+  session.
 - Issues with verified evidence may move directly to `Done`; they do not accumulate in human
   review.
 - A valid negative result is also `Done` with a durable `rejected` evidence outcome. Workers never
@@ -27,6 +29,24 @@ execution trail between fresh Codex sessions.
   profile, and live trading remains separately authorized.
 - The project description holds the big objective, the `[Goal]` issue holds measurable success
   criteria, and `[Agent Goal Review]` holds human maintain/adjust decisions.
+- Every accepted operator-feedback message becomes a durable `[Human]` issue in `Todo`. Loophony
+  selects Human issues by Linear priority and creation time, creates a linked `[Work]` issue, and
+  dispatches only the Work issue. The machine markers make this idempotent across daemon restarts.
+  Explicit preemption returns the interrupted source issue to Todo, defaults the new request to
+  Urgent when no priority is supplied, and preserves the source workspace for later resumption.
+- While work is running, Loophony appends immutable Linear checkpoint comments and periodic health
+  comments. Every record includes UTC and KST timestamps; existing progress comments are never
+  edited or deleted.
+- Long external waits are represented as durable `Waiting` records instead of sleeping inside a
+  Codex turn. Long-running local commands can be launched as supervised jobs whose status, log,
+  exit marker, and resume context survive daemon restarts.
+- A separate append-only SQLite audit ledger records operator, scheduler, checkpoint, wait, job,
+  budget, goal-review, and memory-health transitions. Each event is secret-redacted and linked to
+  the previous event with a versioned canonical SHA-256 format so offline edits are detectable.
+- Configurable issue/day token and active-runtime budgets warn before and after exhaustion without
+  stopping work by default; explicit `block` and daily-reset `wait` policies remain available. The
+  goal policy rejects ambiguous executable queues,
+  missing goal versions, and work that does not map to the single active stage.
 
 ## Set up from Codex App
 
@@ -144,6 +164,82 @@ gate states.
 
 After health succeeds, use `$loophony-control` in Codex App to inspect or steer the daemon.
 
+## Ask Codex about prior loops
+
+Loophony keeps retrieval and answer generation separate. Loophony normalizes documents and creates
+contextual, paragraph-aware sections; Onyx v4 owns ingestion, embeddings, and OpenSearch 3.6
+keyword/vector hybrid retrieval. Its local model servers use
+`intfloat/multilingual-e5-base` (768 dimensions), so Korean questions search Korean and English
+evidence directly without translating or storing an English-only copy. Query expansion and Onyx
+LLM document selection stay disabled: Codex uses the `loophony-query` skill and Loophony's
+read-only MCP tools to synthesize the final evidence-backed answer.
+
+The index contains seven provenance-preserving document types: the canonical `linear_project`
+objective, current `linear_issue` snapshots, derived `session_summary` rollups, raw `checkpoint`
+records, final agent messages, errors, and session lifecycle events. The project objective is
+stored once under a stable project ID instead of being repeated in every issue chunk. Project and
+issue snapshots are updated after tracker reads; unchanged content is not re-embedded again during
+the same daemon runtime. Session summaries are generated deterministically at turn completion from
+that session's checkpoints and recent final messages. They help navigation but do not replace the
+raw records used to verify claims.
+
+### RAG document-processing policy
+
+- Preserve raw evidence and create summaries as separate derived documents. Do not make a lossy
+  summary the only searchable record.
+- Use stable source IDs, schema versions, update timestamps, and content hashes so changed records
+  upsert predictably and unchanged records can be skipped.
+- Chunk on paragraph boundaries (up to 1,200 characters here), let Onyx enforce its token-aware
+  limit, and prepend project, evidence type, issue, session, timestamp, and title context to every
+  submitted section. The active E5 model truncates inputs beyond 512 tokens, so large character-only
+  chunks are unsafe for multilingual text.
+- Store filterable provenance separately from searchable text, then apply issue, session, type, and
+  time filters before Codex writes an answer.
+- Evaluate retrieval independently with a small set of real Korean and English progress, decision,
+  failure, and chronology questions; measure whether the supporting evidence appears in the top
+  results before evaluating answer prose.
+
+## Silent-death protection
+
+Loophony uses independent liveness layers rather than treating an `In Progress` Linear state as
+proof that work is alive:
+
+- The orchestrator polls every 30 seconds and measures silence from the latest Codex app-server
+  event. The quant profile restarts a silent worker after 10 minutes while preserving its workspace.
+- A running issue receives an append-only `## Loophony Health` comment every 15 minutes. It records
+  the observation time, daemon boot ID, worker state, session, latest event time, silence duration,
+  restart threshold, and next heartbeat in both UTC and KST.
+- Semantic loop checkpoints are appended as separate `## Loophony Checkpoint` comments. Identical
+  retries are deduplicated by a content fingerprint, while changed evidence remains visible as a
+  new immutable revision.
+- A detected silent stall appends a timestamped health event before the worker is restarted.
+- Memory health uses a real hybrid-search canary, tracks search and ingestion separately, and opens
+  a short circuit breaker after repeated failures instead of reporting a healthy socket as healthy
+  retrieval.
+- On macOS, the independent launchd watchdog probes the loopback API every 60 seconds and restarts
+  the daemon only after two consecutive failures, so one transient timeout does not interrupt work.
+
+These choices follow current guidance on cleaning, metadata, semantic chunking, incremental
+updates, and retrieval evaluation from
+[Microsoft's advanced RAG guide](https://learn.microsoft.com/en-us/azure/developer/ai/advanced-retrieval-augmented-generation),
+the context-prepending and hybrid retrieval findings in
+[Anthropic's Contextual Retrieval](https://www.anthropic.com/engineering/contextual-retrieval),
+[Onyx's stable document/section model](https://docs.onyx.app/developers/core_concepts), and
+[OpenSearch's rank evaluation API](https://docs.opensearch.org/latest/api-reference/search-apis/rank-eval/).
+The model-specific limit comes from the
+[`multilingual-e5-base` model card](https://huggingface.co/intfloat/multilingual-e5-base).
+
+Start the local retrieval dependencies before enabling `memory` in the rendered workflow:
+
+```sh
+python3 elixir/scripts/onyx_bootstrap.py
+```
+
+Then ask in Codex App, for example, “지난 세션들이 인증 마이그레이션을 포기한 이유가 뭐야?”
+The answer cites exact issue, session, and evidence identifiers. The Onyx administrator token is
+stored in macOS Keychain and is available only to the Loophony daemon; the Codex plugin exposes a
+smaller read-only search surface rather than direct administrative access.
+
 ## Example: a quant research goal
 
 Assume the Linear project is `Quant Research Lab` and the initial request is vague:
@@ -193,29 +289,37 @@ Reframe: required data is unavailable or the evidence gates cannot answer the in
 Loophony then turns the contract into bounded work, one issue at a time:
 
 1. Codex App seeds `QRL-101 — Build immutable point-in-time dataset manifest`, mapped to `SC-01`.
-2. One Codex session executes only `QRL-101`, records checkpoints in SQLite, updates one Linear
-   workpad, commits reproducible artifacts, creates or reuses `QRL-102 — Add adversarial leakage
+2. One Codex session executes only `QRL-101`, records checkpoints in SQLite, keeps its bootstrap
+   workpad immutable, appends timestamped Linear checkpoint comments, commits reproducible
+   artifacts, creates or reuses `QRL-102 — Add adversarial leakage
    fixtures`, and moves `QRL-101` to `Done` when evidence passes.
 3. Completion triggers an immediate poll. Because no loop is running, Loophony selects `QRL-102`
    without waiting for the idle heartbeat.
 4. A later fresh session evaluates a signal hypothesis for `SC-03`. A correctly reproduced
    negative result may finish that issue as `Rejected`; it is not treated as an agent failure.
-5. The user may inspect Linear at any time and submit asynchronous feedback. A goal adjustment
-   creates a new goal version and future issues are realigned to it without a routine global pause.
+5. The user may inspect Linear at any time and submit feedback. Every accepted request becomes a
+   `[Human]` Todo issue, so the user can see exactly which ticket Loophony will handle. Loophony
+   claims the highest-priority oldest Human issue and creates a linked `[Work]` issue for execution.
+   Ordinary feedback stays queued without disturbing active work. Only an explicit preemption
+   interrupts the active Codex turn and preserves its workspace before scheduling resumes.
 
 ```mermaid
 flowchart TD
-    A["Linear project goal contract"] --> B["Select one aligned Candidate / Ready issue"]
-    B --> C["Fresh Codex session"]
-    C --> D["Read project, root goal, issue, repo, and issue checkpoints"]
-    D --> E["Execute and verify one bounded increment"]
-    E --> F{"Outcome"}
-    F -->|"Done / Rejected"| G["Persist evidence and create or reuse next Candidate"]
-    F -->|"Retry"| H["End turn; retry policy schedules another attempt"]
-    F -->|"Blocked"| I["Pause and request human input"]
-    G --> K["Immediately poll for the next single issue"]
-    I --> L["Mention reviewer and wait for explicit unblock input"]
-    K --> B
+    A["Linear project goal contract"] --> B["Reconcile Todo Human issues by priority and age"]
+    B --> C["Create or recover linked Work issue"]
+    C --> D["Select one aligned Candidate / Ready Work issue"]
+    D --> E["Fresh Codex session"]
+    E --> F["Read project, Work issue, linked Human request, repo, and checkpoints"]
+    F --> G["Execute and verify one bounded increment"]
+    G --> H{"Outcome"}
+    H -->|"Done / Rejected"| I["Persist evidence and complete the source Human issue"]
+    H -->|"Retry"| J["End turn; retry policy schedules another attempt"]
+    H -->|"Blocked"| K["Pause and request human input"]
+    G -->|"Explicit preempt"| L["Interrupt turn and preserve workspace"]
+    I --> M["Immediately poll for the next single issue"]
+    K --> N["Mention reviewer and wait for explicit unblock input"]
+    L --> B
+    M --> B
 ```
 
 ## How a fresh session recovers context

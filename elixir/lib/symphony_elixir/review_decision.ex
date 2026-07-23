@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ReviewDecision do
   Persists a required scheduled goal-review decision and resumes orchestration.
   """
 
-  alias SymphonyElixir.{Config, LoopStore, Orchestrator, Tracker}
+  alias SymphonyElixir.{AuditLog, Config, GoalPolicy, LoopStore, Orchestrator, Tracker}
 
   @decisions ~w(maintain adjust)
   @max_feedback_bytes 10_000
@@ -35,6 +35,18 @@ defmodule SymphonyElixir.ReviewDecision do
            ),
          {:ok, resolved_gate} <- resolve_gate(loop_store, decision, feedback),
          {:ok, resume} <- resume_orchestrator(orchestrator) do
+      _ =
+        AuditLog.record_async("goal_review.decided", %{
+          actor: "human",
+          resource_type: "review_gate",
+          resource_id: gate.window_key,
+          metadata: %{
+            decision: decision,
+            review_issue_identifier: review_issue.identifier,
+            goal_version: GoalPolicy.extract_goal_version(feedback)
+          }
+        })
+
       {:ok,
        %{
          accepted: true,
@@ -115,12 +127,12 @@ defmodule SymphonyElixir.ReviewDecision do
     submitted_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
     """
-    ## Goal Review Decision
+    ## 목표 검토 결정
 
     <!-- symphony-goal-review-decision:#{gate.window_key} -->
-    - Decision: `#{decision}`
-    - Source: Codex App
-    - Submitted at: #{submitted_at}
+    - 결정: `#{decision}`
+    - 출처: Codex App
+    - 제출 시각: #{submitted_at}
 
     #{feedback}
     """

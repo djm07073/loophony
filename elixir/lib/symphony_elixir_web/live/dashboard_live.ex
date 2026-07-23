@@ -98,6 +98,18 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Waiting</p>
+            <p class="metric-value numeric"><%= Map.get(@payload.counts, :waiting, 0) %></p>
+            <p class="metric-detail">Automated waits monitored without spending Codex tokens.</p>
+          </article>
+
+          <article class="metric-card">
+            <p class="metric-label">Human intake</p>
+            <p class="metric-value numeric"><%= get_in(@payload, [:intake, :candidates]) || 0 %></p>
+            <p class="metric-detail">Todo Human issues waiting for priority-based Work issue creation.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -110,6 +122,120 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
           </article>
+        </section>
+
+        <section :if={is_map(@payload.goal_policy)} class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Goal progress</h2>
+              <p class="section-copy">Typed goal version, active success criterion, and dispatch-policy alignment.</p>
+            </div>
+            <span class={health_badge_class(Map.get(@payload.goal_policy, :valid, true))}>
+              <%= if Map.get(@payload.goal_policy, :valid, true), do: "Aligned", else: "Policy violation" %>
+            </span>
+          </div>
+          <div class="goal-grid">
+            <div class="goal-cell">
+              <span class="metric-label">Goal version</span>
+              <strong class="goal-value numeric"><%= Map.get(@payload.goal_policy, :goal_version) || "n/a" %></strong>
+            </div>
+            <div class="goal-cell">
+              <span class="metric-label">Active stage</span>
+              <strong class="goal-value"><%= Map.get(@payload.goal_policy, :active_stage) || "n/a" %></strong>
+            </div>
+            <div class="goal-cell">
+              <span class="metric-label">Todo queue</span>
+              <strong class="goal-value numeric"><%= Map.get(@payload.goal_policy, :todo_count, 0) %></strong>
+            </div>
+            <div class="goal-cell">
+              <span class="metric-label">In progress</span>
+              <strong class="goal-value numeric"><%= Map.get(@payload.goal_policy, :in_progress_count, 0) %> / 1</strong>
+            </div>
+            <div class="goal-cell">
+              <span class="metric-label">Review lineage</span>
+              <strong class="goal-value">
+                <%= if get_in(@payload.goal_policy, [:review, :stale]), do: "Stale", else: "Current" %>
+              </strong>
+            </div>
+          </div>
+          <%= if Map.get(@payload.goal_policy, :violations, []) != [] do %>
+            <pre class="code-panel"><%= Enum.join(@payload.goal_policy.violations, "\n") %></pre>
+          <% end %>
+        </section>
+
+        <section class="metric-grid health-grid">
+          <article class="metric-card">
+            <p class="metric-label">Memory search</p>
+            <p class="metric-value metric-value-compact"><%= health_label(get_in(@payload, [:memory, :search_healthy])) %></p>
+            <p class="metric-detail"><%= get_in(@payload, [:memory, :error]) || "Functional canary is passing." %></p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Audit chain</p>
+            <p class="metric-value metric-value-compact"><%= health_label(get_in(@payload, [:audit, :available])) %></p>
+            <p class="metric-detail numeric"><%= format_int(get_in(@payload, [:audit, :total_events]) || 0) %> durable events</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Daily budget</p>
+            <p class="metric-value metric-value-compact numeric">
+              <%= format_int(get_in(@payload, [:budget, :daily_usage, :total_tokens]) || 0) %>
+            </p>
+            <p class="metric-detail">of <%= format_int(get_in(@payload, [:budget, :limits, :max_tokens_per_day]) || 0) %> tokens</p>
+          </article>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Automated waits</h2>
+              <p class="section-copy">Time and condition triggers observed by Elixir while Codex is asleep.</p>
+            </div>
+          </div>
+          <%= if Map.get(@payload, :waiting, []) == [] do %>
+            <p class="empty-state">No automated waits.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>Issue</th><th>Reason</th><th>Wake</th><th>Deadline</th><th>Condition</th></tr></thead>
+                <tbody>
+                  <tr :for={wait <- @payload.waiting}>
+                    <td class="mono"><%= wait.issue_identifier %></td>
+                    <td><%= wait.reason %></td>
+                    <td class="mono"><%= wait.wake_at || "condition" %></td>
+                    <td class="mono"><%= wait.deadline_at || "none" %></td>
+                    <td class="mono"><%= get_in(wait, [:condition, "type"]) || "time" %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Durable jobs</h2>
+              <p class="section-copy">Collectors and long-running processes owned across Codex turn boundaries.</p>
+            </div>
+          </div>
+          <%= if Map.get(@payload, :jobs, []) == [] do %>
+            <p class="empty-state">No durable jobs recorded.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>Issue</th><th>Job</th><th>Status</th><th>PID</th><th>Started</th><th>Exit</th></tr></thead>
+                <tbody>
+                  <tr :for={job <- @payload.jobs}>
+                    <td class="mono"><%= job.issue_identifier %></td>
+                    <td class="mono"><%= job.job_id %></td>
+                    <td><span class={state_badge_class(job.status)}><%= job.status %></span></td>
+                    <td class="numeric"><%= job.pid || "n/a" %></td>
+                    <td class="mono"><%= job.started_at %></td>
+                    <td class="numeric"><%= if is_nil(job.exit_code), do: "n/a", else: job.exit_code %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
         </section>
 
         <section class="section-card">
@@ -436,6 +562,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
       true -> base
     end
   end
+
+  defp health_badge_class(true), do: "state-badge state-badge-active"
+  defp health_badge_class(false), do: "state-badge state-badge-danger"
+  defp health_badge_class(_value), do: "state-badge"
+
+  defp health_label(true), do: "Healthy"
+  defp health_label(false), do: "Degraded"
+  defp health_label(_value), do: "Unavailable"
 
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)

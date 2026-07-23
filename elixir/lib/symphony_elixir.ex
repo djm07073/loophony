@@ -28,6 +28,10 @@ defmodule SymphonyElixir.Application do
       {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
       SymphonyElixir.WorkflowStore,
       SymphonyElixir.LoopStore,
+      SymphonyElixir.AuditLog,
+      SymphonyElixir.RuntimeStore,
+      SymphonyElixir.JobSupervisor,
+      SymphonyElixir.MemoryStore,
       SymphonyElixir.Orchestrator,
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard
