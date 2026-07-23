@@ -20,10 +20,20 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 4. Sends a workflow prompt to Codex
 5. Keeps Codex working on the issue until the work is done
 
-During app-server sessions, Symphony also serves client-side `linear_graphql` and
-`symphony_loop_checkpoint` tools. The former supports raw Linear GraphQL calls; the latter records
+During app-server sessions, Symphony also serves client-side `linear_graphql`,
+`symphony_loop_checkpoint`, `symphony_wait`, and `symphony_job_*` tools. They support bounded
+Linear access, semantic checkpoints, durable automated waits, and supervised commands whose
+status and logs survive fresh turns and daemon restarts. The checkpoint tool records
 structured observations, decisions, verification evidence, and next actions in local SQLite so a
-fresh Codex session can resume the feedback loop without depending on chat history.
+fresh Codex session can resume the feedback loop without depending on chat history. Each semantic
+checkpoint revision is also appended to Linear as a new immutable comment with UTC and KST times;
+identical retries are deduplicated with a deterministic content marker.
+
+When `observability.linear_heartbeat_interval_ms` is positive, the orchestrator also appends a
+timestamped Linear health comment for each running issue at that interval. It reports the daemon
+boot ID, worker process state, session, latest Codex event time, silence age, configured stall
+threshold, and next heartbeat. Stall detection still runs independently on every poll and restarts
+a silent worker after `codex.stall_timeout_ms`.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -102,6 +112,34 @@ workspace:
 loop:
   database_path: ~/code/workspaces/_loop/symphony-loop.sqlite3
   recent_limit: 12
+audit:
+  enabled: true
+  database_path: ~/.local/share/loophony/audit.sqlite3
+automation:
+  enabled: true
+  database_path: ~/.local/share/loophony/runtime.sqlite3
+intake:
+  enabled: true
+  todo_state: Todo
+  completed_state: Done
+  max_claims_per_poll: 1
+budget:
+  enabled: true
+  max_tokens_per_issue: 5000000
+  max_tokens_per_day: 20000000
+  max_active_seconds_per_issue: 3600
+  warn_at_percent: 70
+  on_exhausted: block
+goal_policy:
+  enabled: true
+memory:
+  enabled: true
+  onyx_api_url: http://127.0.0.1:8780
+  onyx_api_key: $ONYX_API_KEY
+  project: loophony
+  search_limit: 12
+observability:
+  linear_heartbeat_interval_ms: 900000
 review:
   enabled: true
   timezone: Asia/Seoul
@@ -136,6 +174,10 @@ Notes:
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
+- The bundled workflows keep the top-level planning and review session on `gpt-5.6-sol`, while
+  setting `agents.default_subagent_model` to `gpt-5.3-codex-spark`. Their prompt delegates a
+  bounded source-code/test implementation to one Spark subagent only when repository edits are
+  required; the parent session reviews the shared-workspace diff and owns final validation.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
@@ -153,6 +195,50 @@ Notes:
   context. Default: `12`; valid range: `1..100`.
 - Stable checkpoint keys are idempotent per issue. Terminal `done` and `rejected` checkpoints
   require non-empty evidence.
+- `audit` stores a secret-redacted append-only event ledger with a SHA-256 hash chain. Verify it
+  with `GET /api/v1/audit/verify`; the chain detects local tampering but is not a substitute for
+  exporting the head hash to an independently controlled system.
+- `automation` stores durable waits, job metadata, and budget counters. `symphony_wait` releases on
+  time, a workspace file/hash change, a loopback HTTP status, or durable job completion.
+  `symphony_job_start` accepts an executable plus an argument array, runs only from the issue
+  workspace, and writes a durable log and exit-code marker.
+- `intake.enabled` turns operator feedback into a new `[Human]` issue in `intake.todo_state`.
+  Loophony sorts pending Human issues by Linear priority (`1` urgent through `4` low, then no
+  priority) and oldest creation time, claims at most `max_claims_per_poll`, and creates a linked
+  `[Work]` issue with the same project, team, assignee, labels, and priority. Only Work issues enter
+  the normal dispatch queue. Description markers recover an existing Work issue after restart, so
+  a partially completed claim does not create a duplicate. The Human source stays in Todo while
+  Work is open, avoiding a second In Progress record. A terminal Work issue moves its source Human
+  issue to `intake.completed_state`. Human and Work descriptions inherit the source issue's mapped
+  goal stage so goal-policy validation remains valid.
+- `budget.on_exhausted: block` fails closed. `wait` pauses a daily-token-only exhaustion until the
+  next UTC day; issue token or runtime limits remain non-renewing and therefore block.
+- `goal_policy` can require a versioned goal, exactly one active `SC-XX` stage, at most one
+  executable `In Progress` issue, and exact issue-to-stage mappings before dispatch. Any number of
+  aligned `Todo` issues may wait; when one issue is already `In Progress`, only that issue is
+  eligible to resume.
+- `memory.enabled` sends the canonical Linear project description, current issue snapshots,
+  deterministic completed-session summaries, existing and new checkpoints, final agent messages,
+  errors, and selected session events to Onyx v4. Loophony creates contextual paragraph-aware
+  sections; Onyx embeds them and provides LLM-free OpenSearch 3.6 keyword/vector hybrid retrieval.
+  Codex generates the answer.
+- Linear project and issue snapshots use stable IDs and update after successful tracker reads.
+  Session summaries use the project objective as a compact goal lens: active stage, intended
+  outcome, rationale, mapped `SC-XX` criteria, and recorded checkpoint alignment. These summaries
+  are derived navigation records; raw checkpoint and response evidence remains indexed for
+  verification. In-process content hashes skip unchanged re-embedding.
+- Run `python3 scripts/onyx_bootstrap.py` before enabling memory. The bootstrap pins Onyx v4.0.0
+  and OpenSearch 3.6.0, configures the 768-dimensional
+  `intfloat/multilingual-e5-base` model, and stores an Onyx administrator personal access token in
+  Keychain.
+- `memory.onyx_api_key` is required when memory is enabled. Prefer `$ONYX_API_KEY`; the bundled
+  launcher loads it from the `symphony-quant` / `onyx-api-key` macOS Keychain item.
+- Memory availability is based on a functional hybrid-search canary. Search and ingestion health,
+  consecutive failures, circuit-breaker state, and last successful timestamps are exposed
+  separately in the dashboard and status API.
+- The read-only memory API is `GET /api/v1/memory/status`, `POST /api/v1/memory/search`, and
+  `GET /api/v1/memory/sessions/:session_id`. Search results retain issue, session, and evidence IDs;
+  the session endpoint returns its derived summary separately from ordered raw evidence.
 - `rejected` is an evidence outcome for a valid negative result; the managed Linear issue still
   closes as `Done`. Workers must not choose `Canceled`, `Cancelled`, or `Duplicate`.
 - `review.enabled` activates a durable, global human-feedback gate. This implementation supports
@@ -164,6 +250,10 @@ Notes:
 - When a completed worker has moved its issue out of the active states, Symphony immediately polls
   for the next single issue. `polling.interval_ms` is only an idle heartbeat and watchdog; it never
   adds a fixed delay between completed issues.
+- A worker cannot leave an issue terminal unless a terminal `learn`/`handoff` checkpoint exists and
+  the tracker can re-read a different eligible Candidate. If either proof is missing, Symphony
+  restores the issue to `In Progress` and continues or retries the same worker. A fully proven root
+  may omit a successor only with `termination_reason=<reason>` in the checkpoint.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
@@ -195,7 +285,16 @@ codex:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, `/api/v1/refresh`,
-  `/api/v1/operator-input`, and `/api/v1/review-decision`.
+  `/api/v1/operator-input`, `/api/v1/review-decision`, `/api/v1/audit`,
+  `/api/v1/audit/verify`, `/api/v1/jobs`, and `/api/v1/waits`. Stopping a durable job requires the
+  same local operator header as other mutations.
+- `/api/v1/operator-input` accepts optional `title` and Linear `priority` fields. With intake
+  enabled, every accepted `instruction`, `goal_adjustment`, `preempt`, or `unblock` creates a new
+  `[Human]` issue and returns its identifier. Ordinary requests remain in the priority queue and do
+  not interrupt active work. Only explicit `preempt` returns the source issue to Todo and sends
+  Codex `turn/interrupt`; if priority is omitted the request defaults to Urgent. A 30-second grace
+  timeout falls back to restarting only the worker. `unblock` also returns the named source issue
+  to the requested active state.
 
 ## Web dashboard
 

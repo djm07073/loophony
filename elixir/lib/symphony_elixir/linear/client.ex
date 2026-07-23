@@ -18,7 +18,13 @@ defmodule SymphonyElixir.Linear.Client do
         title
         description
         project {
+          id
+          name
+          slugId
           description
+          content
+          url
+          updatedAt
         }
         priority
         state {
@@ -66,7 +72,13 @@ defmodule SymphonyElixir.Linear.Client do
         title
         description
         project {
+          id
+          name
+          slugId
           description
+          content
+          url
+          updatedAt
         }
         priority
         state {
@@ -453,13 +465,19 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_issue(issue, assignee_filter) when is_map(issue) do
     assignee = issue["assignee"]
+    project = issue["project"] || %{}
 
     %Issue{
       id: issue["id"],
       identifier: issue["identifier"],
       title: issue["title"],
       description: issue["description"],
-      project_description: get_in(issue, ["project", "description"]),
+      project_id: project["id"],
+      project_name: project["name"],
+      project_slug: project["slugId"],
+      project_description: first_non_blank([project["content"], project["description"]]),
+      project_url: project["url"],
+      project_updated_at: parse_datetime(project["updatedAt"]),
       priority: parse_priority(issue["priority"]),
       state: get_in(issue, ["state", "name"]),
       branch_name: issue["branchName"],
@@ -474,6 +492,10 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp normalize_issue(_issue, _assignee_filter), do: nil
+
+  defp first_non_blank(values) do
+    Enum.find(values, fn value -> is_binary(value) and String.trim(value) != "" end)
+  end
 
   defp assignee_field(%{} = assignee, field) when is_binary(field), do: assignee[field]
   defp assignee_field(_assignee, _field), do: nil

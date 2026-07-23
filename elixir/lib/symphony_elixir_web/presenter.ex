@@ -17,14 +17,23 @@ defmodule SymphonyElixirWeb.Presenter do
             running: length(snapshot.running),
             queued: length(Map.get(snapshot, :queued, [])),
             retrying: length(snapshot.retrying),
-            blocked: length(Map.get(snapshot, :blocked, []))
+            blocked: length(Map.get(snapshot, :blocked, [])),
+            waiting: length(Map.get(snapshot, :waiting, []))
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           queued: Enum.map(Map.get(snapshot, :queued, []), &queued_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          waiting: Map.get(snapshot, :waiting, []),
+          jobs: Map.get(snapshot, :jobs, []),
           loop: Map.get(snapshot, :loop),
           review_gate: Map.get(snapshot, :review_gate),
+          goal_policy: Map.get(snapshot, :goal_policy),
+          intake: Map.get(snapshot, :intake),
+          runtime: Map.get(snapshot, :runtime),
+          budget: Map.get(snapshot, :budget),
+          memory: Map.get(snapshot, :memory),
+          audit: Map.get(snapshot, :audit),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits,
           polling: polling_payload(Map.get(snapshot, :polling))
@@ -42,24 +51,12 @@ defmodule SymphonyElixirWeb.Presenter do
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
-        running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
-        queued = Enum.find(Map.get(snapshot, :queued, []), &(&1.identifier == issue_identifier))
-        retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
-        blocked = Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier))
+        entries = issue_entries(snapshot, issue_identifier)
 
-        if is_nil(running) and is_nil(queued) and is_nil(retry) and is_nil(blocked) do
+        if Enum.all?(Map.values(entries), &is_nil/1) do
           {:error, :issue_not_found}
         else
-          {:ok,
-           issue_payload_body(
-             issue_identifier,
-             running,
-             queued,
-             retry,
-             blocked,
-             Map.get(snapshot, :loop),
-             Map.get(snapshot, :review_gate)
-           )}
+          {:ok, issue_payload_body(issue_identifier, entries, snapshot)}
         end
 
       _ ->
@@ -78,11 +75,13 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, queued, retry, blocked, loop, review_gate) do
+  defp issue_payload_body(issue_identifier, entries, snapshot) do
+    %{running: running, queued: queued, retry: retry, blocked: blocked, waiting: waiting} = entries
+
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, queued, retry, blocked),
-      status: issue_status(running, queued, retry, blocked),
+      issue_id: issue_id_from_entries(entries),
+      status: issue_status(running, queued, retry, blocked, waiting),
       workspace: %{
         path: workspace_path(issue_identifier, running, retry, blocked),
         host: workspace_host(running, retry, blocked)
@@ -95,8 +94,12 @@ defmodule SymphonyElixirWeb.Presenter do
       queue: queued && queued_issue_payload(queued),
       retry: retry && retry_issue_payload(retry),
       blocked: blocked && blocked_issue_payload(blocked),
-      loop: issue_loop_payload(loop, issue_identifier),
-      review_gate: review_gate,
+      waiting: waiting,
+      loop: issue_loop_payload(Map.get(snapshot, :loop), issue_identifier),
+      review_gate: Map.get(snapshot, :review_gate),
+      goal_policy: Map.get(snapshot, :goal_policy),
+      intake: Map.get(snapshot, :intake),
+      budget: issue_budget_payload(Map.get(snapshot, :budget), issue_identifier),
       logs: %{
         codex_session_logs: []
       },
@@ -106,25 +109,37 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp issue_id_from_entries(running, queued, retry, blocked),
-    do:
-      (running && running.issue_id) || (queued && queued.issue_id) || (retry && retry.issue_id) ||
-        (blocked && blocked.issue_id)
+  defp issue_entries(snapshot, issue_identifier) do
+    %{
+      running: Enum.find(snapshot.running, &(&1.identifier == issue_identifier)),
+      queued: Enum.find(Map.get(snapshot, :queued, []), &(&1.identifier == issue_identifier)),
+      retry: Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier)),
+      blocked: Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier)),
+      waiting: Enum.find(Map.get(snapshot, :waiting, []), &(&1.issue_identifier == issue_identifier))
+    }
+  end
+
+  defp issue_id_from_entries(entries) do
+    [entries.running, entries.queued, entries.retry, entries.blocked, entries.waiting]
+    |> Enum.find_value(&(&1 && &1.issue_id))
+  end
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(running, _queued, _retry, _blocked) when not is_nil(running), do: "running"
-  defp issue_status(nil, queued, _retry, _blocked) when not is_nil(queued), do: "queued"
-  defp issue_status(nil, nil, retry, _blocked) when not is_nil(retry), do: "retrying"
-  defp issue_status(nil, nil, nil, _blocked), do: "blocked"
+  defp issue_status(running, _queued, _retry, _blocked, _waiting) when not is_nil(running), do: "running"
+  defp issue_status(nil, queued, _retry, _blocked, _waiting) when not is_nil(queued), do: "queued"
+  defp issue_status(nil, nil, retry, _blocked, _waiting) when not is_nil(retry), do: "retrying"
+  defp issue_status(nil, nil, nil, blocked, _waiting) when not is_nil(blocked), do: "blocked"
+  defp issue_status(nil, nil, nil, nil, _waiting), do: "waiting"
 
   defp running_entry_payload(entry) do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
+      run_id: Map.get(entry, :run_id),
       state: entry.state,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
@@ -140,6 +155,7 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: entry.codex_total_tokens
       }
     }
+    |> maybe_put_preemption(Map.get(entry, :preemption))
   end
 
   defp retry_entry_payload(entry) do
@@ -201,6 +217,7 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: running.codex_total_tokens
       }
     }
+    |> maybe_put_preemption(Map.get(running, :preemption))
   end
 
   defp retry_issue_payload(retry) do
@@ -236,6 +253,12 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  defp issue_budget_payload(%{issues: issues}, issue_identifier) when is_list(issues) do
+    Enum.find(issues, &(Map.get(&1, :issue_identifier) == issue_identifier))
+  end
+
+  defp issue_budget_payload(_budget, _issue_identifier), do: nil
+
   defp workspace_path(issue_identifier, running, retry, blocked) do
     (running && Map.get(running, :workspace_path)) ||
       (retry && Map.get(retry, :workspace_path)) ||
@@ -260,6 +283,18 @@ defmodule SymphonyElixirWeb.Presenter do
       }
     ]
     |> Enum.reject(&is_nil(&1.at))
+  end
+
+  defp preemption_payload(nil), do: nil
+
+  defp preemption_payload(preemption) when is_map(preemption) do
+    Map.update(preemption, :requested_at, nil, &iso8601/1)
+  end
+
+  defp maybe_put_preemption(payload, nil), do: payload
+
+  defp maybe_put_preemption(payload, preemption) do
+    Map.put(payload, :preemption, preemption_payload(preemption))
   end
 
   defp summarize_message(nil), do: nil

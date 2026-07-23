@@ -1149,6 +1149,8 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_event(:startup_failed, message, _payload), do: "startup failed: #{format_reason(message)}"
   defp humanize_codex_event(:turn_failed, _message, payload), do: humanize_codex_method("turn/failed", payload)
   defp humanize_codex_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
+  defp humanize_codex_event(:turn_preempt_requested, _message, _payload), do: "operator preemption requested"
+  defp humanize_codex_event(:turn_preempted, _message, _payload), do: "turn preempted by operator"
   defp humanize_codex_event(:malformed, _message, _payload), do: "malformed JSON event from codex"
   defp humanize_codex_event(_event, _message, _payload), do: nil
 

@@ -96,7 +96,7 @@ defmodule SymphonyElixir.ReviewDecisionTest do
     assert payload.resume.resumed == true
     assert_receive {:resolve_review_issue, "QNT-REVIEW"}
     assert_receive {:review_comment, "review-1", body}
-    assert body =~ "Goal Review Decision"
+    assert body =~ "목표 검토 결정"
     assert body =~ "Narrow the goal"
     assert_receive {:resolve_review_gate, "adjust", "Narrow the goal to liquid US equities."}
   end

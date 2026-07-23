@@ -18,6 +18,25 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/symphony-workspaces
+audit:
+  enabled: true
+automation:
+  enabled: true
+intake:
+  enabled: true
+  todo_state: Todo
+  completed_state: Done
+  max_claims_per_poll: 1
+budget:
+  enabled: false
+goal_policy:
+  enabled: false
+memory:
+  enabled: false
+  onyx_api_url: http://127.0.0.1:8780
+  onyx_api_key: $ONYX_API_KEY
+  project: loophony
+  search_limit: 12
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
@@ -31,7 +50,7 @@ agent:
   max_queued_issues: 1
   max_turns: 20
 codex:
-  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.6-sol"' --config model_reasoning_effort=medium --config 'agents.default_subagent_model="gpt-5.3-codex-spark"' --config agents.default_subagent_reasoning_effort=high app-server
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
@@ -47,7 +66,8 @@ Continuation context:
 - This is retry attempt #{{ attempt }} because the ticket is still in an active state.
 - Resume from the current workspace state instead of restarting from scratch.
 - Do not repeat already-completed investigation or validation unless needed for new code changes.
-- Do not end the turn while the issue remains in an active state unless you are blocked by missing required permissions/secrets.
+- Do not end the turn while the issue remains active unless you registered a durable automated wait
+  or are blocked by missing required permissions/secrets.
   {% endif %}
 
 Issue context:
@@ -102,6 +122,14 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Move status only when the matching quality bar is met.
 - Operate autonomously end-to-end unless blocked by missing requirements, secrets, or permissions.
 - Use the blocked-access escape hatch only for true external blockers (missing required tools/auth) after exhausting documented fallbacks.
+- Do not hold a Codex turn open with long sleeps or polling. For a command expected to outlive the
+  turn, launch it with `symphony_job_start`, persist its job ID in the workpad/checkpoint, and call
+  `symphony_wait` with a `job_complete` condition. For review or external-state polling, register a
+  bounded time/file/loopback-HTTP wait and end the turn; the daemon will resume the same issue with
+  durable context. Automated `Waiting` is not a human `Blocked` state.
+- When a durable job owns its cadence, cursor, artifacts, and heartbeat, do not wake a Codex turn for
+  every internal sampling interval. Wait for `job_complete` with a bounded deadline and let the
+  daemon monitor job health without spending Codex tokens.
 
 ## Related skills
 
@@ -209,26 +237,32 @@ Use this only when completion is blocked by missing required tools or missing au
 2.  If current issue state is `Todo`, move it to `In Progress`; otherwise leave the current state unchanged.
 3.  Load the existing workpad comment and treat it as the active execution checklist.
     - Edit it liberally whenever reality changes (scope, risks, validation approach, discovered tasks).
-4.  Implement against the hierarchical TODOs and keep the comment current:
+4.  If completing the issue requires source-code or test-file edits, delegate the bounded implementation to exactly one subagent before making those edits yourself:
+    - The subagent uses the configured default model `gpt-5.3-codex-spark` and works in the shared issue workspace.
+    - Give it the issue's bounded objective, relevant reproduction evidence, acceptance criteria, file scope, and required tests. Instruct it to implement and run targeted validation, then return a concise summary of changed files and results.
+    - Wait for it to finish. The parent worker remains responsible for inspecting the complete diff, running or confirming required validation, correcting any gaps itself, and deciding whether the issue is complete.
+    - Do not delegate planning, Linear updates, acceptance decisions, final review, publishing, or non-coding work. Do not create a coding subagent when no repository edit is required.
+    - If subagent startup is unavailable or fails, record that fact in the workpad and implement in the parent session; this is not an external blocker.
+5.  Implement against the hierarchical TODOs and keep the comment current:
     - Check off completed items.
     - Add newly discovered items in the appropriate section.
     - Keep parent/child structure intact as scope evolves.
     - Update the workpad immediately after each meaningful milestone (for example: reproduction complete, code change landed, validation run, review feedback addressed).
     - Never leave completed work unchecked in the plan.
     - For tickets that started as `Todo` with an attached PR, run the full PR feedback sweep protocol immediately after kickoff and before new feature work.
-5.  Run validation/tests required for the scope.
+6.  Run validation/tests required for the scope.
     - Mandatory gate: execute all ticket-provided `Validation`/`Test Plan`/ `Testing` requirements when present; treat unmet items as incomplete work.
     - Prefer a targeted proof that directly demonstrates the behavior you changed.
     - You may make temporary local proof edits to validate assumptions (for example: tweak a local build input for `make`, or hardcode a UI account / response path) when this increases confidence.
     - Revert every temporary proof edit before commit/push.
     - Document these temporary proof steps and outcomes in the workpad `Validation`/`Notes` sections so reviewers can follow the evidence.
     - If app-touching, run `launch-app` validation and capture/upload media via `github-pr-media` before handoff.
-6.  Re-check all acceptance criteria and close any gaps.
-7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
-8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
+7.  Re-check all acceptance criteria and close any gaps.
+8.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
+9.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
     - Ensure the GitHub PR has label `symphony` (add it if missing).
-9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
-10. Update the workpad comment with final checklist status and validation notes.
+10. Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
+11. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
     - Add final handoff notes (commit + validation summary) in the same workpad comment.
     - Do not include PR URL in the workpad comment; keep PR linkage on the issue via attachment/link fields.

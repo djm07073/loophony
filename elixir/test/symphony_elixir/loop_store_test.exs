@@ -15,9 +15,18 @@ defmodule SymphonyElixir.LoopStoreTest do
   test "persists idempotent checkpoints and exposes recent loop context", %{name: name, path: path} do
     issue = %Issue{id: "issue-1", identifier: "QNT-1"}
 
-    assert {:ok, first} = LoopStore.record_checkpoint(issue, checkpoint(), 1, name)
+    first_attributes =
+      checkpoint()
+      |> Map.put(:session_id, "thread-1-turn-1")
+      |> Map.put(:thread_id, "thread-1")
+      |> Map.put(:turn_id, "turn-1")
+
+    assert {:ok, first} = LoopStore.record_checkpoint(issue, first_attributes, 1, name)
     assert first.issue_identifier == "QNT-1"
     assert first.evidence == ["test:pass"]
+    assert first.session_id == "thread-1-turn-1"
+    assert first.thread_id == "thread-1"
+    assert first.turn_id == "turn-1"
     assert File.exists?(path)
 
     updated =
@@ -32,6 +41,8 @@ defmodule SymphonyElixir.LoopStoreTest do
 
     assert {:ok, [recent]} = LoopStore.recent("issue-1", 5, name)
     assert recent.outcome == "done"
+    assert {:ok, [all_checkpoint]} = LoopStore.all_checkpoints(name)
+    assert all_checkpoint.id == recent.id
 
     summary = LoopStore.summary(name)
     assert summary.available == true

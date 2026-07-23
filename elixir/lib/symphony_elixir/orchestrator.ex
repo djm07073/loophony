@@ -7,11 +7,29 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, LoopStore, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    AuditLog,
+    BudgetPolicy,
+    Config,
+    GoalPolicy,
+    HumanIntake,
+    LoopStore,
+    MemoryStore,
+    RuntimeStore,
+    StatusDashboard,
+    Tracker,
+    WaitCondition,
+    Workspace
+  }
+
+  @snapshot_dependency_timeout_ms 250
+
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @preempt_grace_ms 30_000
   @top_level_session_limit 1
   @pending_issue_limit 1
   # Slightly above the dashboard render interval so "checking now…" can render.
@@ -35,14 +53,20 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :runtime_id,
+      :runtime_started_at,
+      :linear_heartbeat_interval_ms,
       running: %{},
       queued: [],
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      linear_health_heartbeats: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      goal_policy: %{enabled: false, valid: true, violations: []},
+      intake: %{enabled: false, candidates: 0, claimed: [], completed: []}
     ]
   end
 
@@ -64,11 +88,15 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      runtime_id: runtime_id(),
+      runtime_started_at: DateTime.utc_now(),
+      linear_heartbeat_interval_ms: config.observability.linear_heartbeat_interval_ms,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
 
     run_terminal_workspace_cleanup()
+    audit("runtime.started", "runtime", state.runtime_id, %{started_at: state.runtime_started_at})
     state = schedule_tick(state, 0)
 
     {:ok, state}
@@ -112,7 +140,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
+    state = release_ready_waits(state)
     state = maybe_dispatch(state)
+    state = enforce_running_budgets(state)
+    state = publish_due_linear_health_heartbeats(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
 
@@ -174,19 +205,51 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
+          |> persist_issue_token_usage(issue_id, updated_running_entry, token_delta)
+          |> enforce_issue_budget(issue_id)
 
         notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+
+        state =
+          if Map.has_key?(state.running, issue_id) do
+            %{state | running: Map.put(state.running, issue_id, updated_running_entry)}
+          else
+            state
+          end
+
+        {:noreply, state}
     end
   end
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
+  def handle_info({:worker_blocked, issue_id, reason}, %{running: running} = state)
+      when is_binary(issue_id) and is_binary(reason) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        completion = %{outcome: :input_required, reason: reason}
+        updated_entry = Map.put(running_entry, :completion, completion)
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_entry)}}
+    end
+  end
+
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
       case pop_retry_attempt_state(state, issue_id, retry_token) do
-        {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
-        :missing -> {:noreply, state}
+        {:ok, attempt, metadata, state} ->
+          audit("retry.fired", "linear_issue", issue_id, %{
+            outcome: "retry",
+            issue_identifier: metadata[:identifier],
+            attempt: attempt
+          })
+
+          handle_retry_issue(state, issue_id, attempt, metadata)
+
+        :missing ->
+          {:noreply, state}
       end
 
     notify_dashboard()
@@ -195,13 +258,38 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  def handle_info({:force_operator_preempt, issue_id, request_id}, state)
+      when is_binary(issue_id) and is_binary(request_id) do
+    next_state = force_operator_preempt(state, issue_id, request_id)
+    notify_dashboard()
+    {:noreply, next_state}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
   end
 
+  defp handle_agent_down(
+         _reason,
+         state,
+         issue_id,
+         %{preempt_request_id: request_id} = running_entry,
+         session_id
+       )
+       when is_binary(request_id) do
+    Logger.info("Operator preemption completed for issue_id=#{issue_id} session_id=#{session_id} request_id=#{request_id}; returning control to the scheduler")
+
+    continue_after_operator_preempt(state, issue_id, running_entry, request_id)
+  end
+
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
     cond do
+      automated_wait_active?(issue_id) ->
+        Logger.info("Agent task entered durable automated wait for issue_id=#{issue_id} session_id=#{session_id}")
+        audit("agent.waiting", "linear_issue", issue_id, %{session_id: session_id})
+        complete_issue(state, issue_id)
+
       input_required_blocker?(running_entry) ->
         block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
 
@@ -224,10 +312,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
-    else
-      retry_agent_down(state, issue_id, running_entry, session_id, reason)
+    cond do
+      automated_wait_active?(issue_id) ->
+        Logger.info("Agent task exited while durable automated wait is active for issue_id=#{issue_id} session_id=#{session_id}")
+        audit("agent.waiting", "linear_issue", issue_id, %{session_id: session_id, exit_reason: inspect(reason)})
+        complete_issue(state, issue_id)
+
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
+
+      true ->
+        retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
   end
 
@@ -266,10 +361,13 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> reconcile_human_intake()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
-      choose_issues_or_pause_for_review(issues, state)
+      issues = Enum.reject(issues, &HumanIntake.human_issue?/1)
+      {eligible_issues, state} = apply_goal_policy(issues, state)
+      choose_issues_or_pause_for_review(eligible_issues, state)
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -311,6 +409,38 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp reconcile_human_intake(%State{} = state) do
+    case HumanIntake.reconcile() do
+      {:ok, summary} ->
+        if summary.claimed != [] or summary.completed != [] do
+          Logger.info(
+            "Human intake reconciled claimed=#{length(summary.claimed)} " <>
+              "completed=#{length(summary.completed)} candidates=#{summary.candidates}"
+          )
+        end
+
+        %{state | intake: summary}
+
+      {:error, reason} ->
+        Logger.warning("Human intake reconciliation failed: #{inspect(reason)}")
+
+        %{
+          state
+          | intake: %{
+              enabled: true,
+              candidates: 0,
+              claimed: [],
+              completed: [],
+              error: inspect(reason)
+            }
+        }
+    end
+  rescue
+    error ->
+      Logger.warning("Human intake configuration unavailable: #{Exception.message(error)}")
+      state
+  end
+
   defp choose_issues_or_pause_for_review(issues, state) do
     case LoopStore.ensure_review_gate() do
       {:ok, %{status: "open"} = gate} ->
@@ -325,6 +455,24 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Goal-review gate state unavailable; failing closed: #{inspect(reason)}")
         queue_without_dispatch(issues, state)
     end
+  end
+
+  defp apply_goal_policy(issues, %State{} = state) do
+    policy = GoalPolicy.evaluate(issues)
+
+    if Map.get(state.goal_policy, :fingerprint) != Map.get(policy, :fingerprint) do
+      outcome = if policy.valid, do: "ok", else: "rejected"
+
+      audit("goal_policy.evaluated", "project", Config.settings!().tracker.project_slug || "unknown", %{
+        outcome: outcome,
+        goal_version: Map.get(policy, :goal_version),
+        active_stage: Map.get(policy, :active_stage),
+        violations: Map.get(policy, :violations, [])
+      })
+    end
+
+    eligible = Enum.filter(issues, &GoalPolicy.eligible?(policy, &1))
+    {eligible, %{state | goal_policy: policy}}
   end
 
   defp queue_without_dispatch(issues, state) do
@@ -355,24 +503,24 @@ defmodule SymphonyElixir.Orchestrator do
     latest = List.first(Map.get(loop, :recent, []))
 
     """
-    ## Scheduled Goal Review — Feedback Required
+    ## 정기 목표 검토 — 피드백 필요
 
     <!-- symphony-goal-review:#{gate.window_key} -->
     #{reviewer}
 
-    Symphony is paused at the #{gate.window_key} review gate. Choose `maintain` or `adjust` and
-    provide non-empty feedback in Codex App before work can continue.
+    Loophony가 #{gate.window_key} 검토 gate에서 일시정지했습니다. 계속하려면 Codex App에서
+    `maintain` 또는 `adjust`를 선택하고 구체적인 피드백을 입력하세요.
 
-    - Running: #{format_issue_identifiers(state.running)}
-    - Queued: #{format_queued_identifiers(state.queued)}
-    - Retry waiting: #{map_size(state.retry_attempts)}
+    - 실행 중: #{format_issue_identifiers(state.running)}
+    - 대기 중: #{format_queued_identifiers(state.queued)}
+    - 재시도 대기: #{map_size(state.retry_attempts)}
     - Runtime Blocked: #{map_size(state.blocked)}
-    - Loop checkpoints: #{Map.get(loop, :total_checkpoints, 0)}
-    - Latest loop decision: #{format_latest_loop_decision(latest)}
-    - Tokens: #{Map.get(state.codex_totals, :total_tokens, 0)}
+    - Loop checkpoint: #{Map.get(loop, :total_checkpoints, 0)}
+    - 최신 loop 결정: #{format_latest_loop_decision(latest)}
+    - Token: #{Map.get(state.codex_totals, :total_tokens, 0)}
 
-    Required decision: keep the current root goal and priorities, or adjust them with an exact
-    rationale, scope change, and next validation target.
+    필요한 결정: 현재 root goal과 우선순위를 유지할지, 아니면 근거·범위 변경·다음 검증
+    대상을 명시해 조정할지 선택하세요.
     """
     |> String.trim()
   end
@@ -653,6 +801,7 @@ defmodule SymphonyElixir.Orchestrator do
         release_issue_claim(state, issue_id)
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
+        cancel_preempt_timer(running_entry)
         state = record_session_completion_totals(state, running_entry)
         worker_host = Map.get(running_entry, :worker_host)
 
@@ -667,7 +816,8 @@ defmodule SymphonyElixir.Orchestrator do
           | running: Map.delete(state.running, issue_id),
             claimed: MapSet.delete(state.claimed, issue_id),
             blocked: Map.delete(state.blocked, issue_id),
-            retry_attempts: Map.delete(state.retry_attempts, issue_id)
+            retry_attempts: Map.delete(state.retry_attempts, issue_id),
+            linear_health_heartbeats: Map.delete(state.linear_health_heartbeats, issue_id)
         }
 
       _ ->
@@ -719,6 +869,7 @@ defmodule SymphonyElixir.Orchestrator do
         |> stop_and_block_issue(issue_id, running_entry, error)
       else
         Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
+        publish_stale_health_event(running_entry, now, elapsed_ms, timeout_ms)
 
         next_attempt = next_retry_attempt_from_running(running_entry)
 
@@ -752,6 +903,137 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
+
+  defp publish_due_linear_health_heartbeats(%State{linear_heartbeat_interval_ms: interval_ms} = state)
+       when is_integer(interval_ms) and interval_ms > 0 do
+    now_ms = System.monotonic_time(:millisecond)
+    observed_at = DateTime.utc_now()
+
+    Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
+      last_published_at_ms = Map.get(state_acc.linear_health_heartbeats, issue_id)
+
+      if heartbeat_due?(last_published_at_ms, now_ms, interval_ms) do
+        publish_linear_health_heartbeat(
+          state_acc,
+          issue_id,
+          running_entry,
+          observed_at,
+          now_ms,
+          interval_ms
+        )
+      else
+        state_acc
+      end
+    end)
+  end
+
+  defp publish_due_linear_health_heartbeats(%State{} = state), do: state
+
+  defp heartbeat_due?(nil, _now_ms, _interval_ms), do: true
+
+  defp heartbeat_due?(last_published_at_ms, now_ms, interval_ms)
+       when is_integer(last_published_at_ms),
+       do: now_ms - last_published_at_ms >= interval_ms
+
+  defp publish_linear_health_heartbeat(
+         state,
+         issue_id,
+         running_entry,
+         observed_at,
+         now_ms,
+         interval_ms
+       ) do
+    body = health_heartbeat_comment(state, running_entry, observed_at, interval_ms)
+
+    case Tracker.create_comment(issue_id, body) do
+      :ok ->
+        Logger.info("Published Linear health heartbeat for #{issue_context(running_entry.issue)} session_id=#{running_entry_session_id(running_entry)}")
+
+        %{
+          state
+          | linear_health_heartbeats: Map.put(state.linear_health_heartbeats, issue_id, now_ms)
+        }
+
+      {:error, reason} ->
+        Logger.warning("Failed to publish Linear health heartbeat for #{issue_context(running_entry.issue)} session_id=#{running_entry_session_id(running_entry)} reason=#{inspect(reason)}")
+        state
+    end
+  end
+
+  defp health_heartbeat_comment(state, running_entry, observed_at, interval_ms) do
+    last_event_at = last_activity_timestamp(running_entry)
+    silence_seconds = activity_age_seconds(last_event_at, observed_at)
+    next_heartbeat_at = DateTime.add(observed_at, interval_ms, :millisecond)
+    stall_timeout_ms = Config.settings!().codex.stall_timeout_ms
+    worker_alive = worker_alive?(Map.get(running_entry, :pid))
+    health = if worker_alive, do: "healthy", else: "degraded"
+
+    """
+    ## Loophony Health — #{utc_time(observed_at)} UTC / #{kst_time(observed_at)} KST
+
+    - 상태: `#{health}`
+    - 확인 시각 (UTC): `#{utc_time(observed_at)}`
+    - 확인 시각 (KST): `#{kst_time(observed_at)}`
+    - daemon boot ID: `#{state.runtime_id}`
+    - daemon 시작 (UTC): `#{utc_time(state.runtime_started_at)}`
+    - worker process: `#{if(worker_alive, do: "alive", else: "not_alive")}`
+    - session: `#{running_entry_session_id(running_entry)}`
+    - 마지막 Codex event: `#{Map.get(running_entry, :last_codex_event) || "initializing"}`
+    - 마지막 event (UTC): `#{optional_utc_time(last_event_at)}`
+    - 마지막 event (KST): `#{optional_kst_time(last_event_at)}`
+    - 무응답 경과: `#{silence_seconds}`초
+    - silent-stall 자동 재시작 기준: `#{div(stall_timeout_ms, 1_000)}`초
+    - 다음 Linear health 예정 (UTC): `#{utc_time(next_heartbeat_at)}`
+    - 다음 Linear health 예정 (KST): `#{kst_time(next_heartbeat_at)}`
+    """
+    |> String.trim()
+  end
+
+  defp publish_stale_health_event(running_entry, observed_at, elapsed_ms, timeout_ms) do
+    body =
+      """
+      ## Loophony Health Event — silent stall 감지
+
+      - 감지 시각 (UTC): `#{utc_time(observed_at)}`
+      - 감지 시각 (KST): `#{kst_time(observed_at)}`
+      - 상태: `stale_detected_restart_scheduled`
+      - session: `#{running_entry_session_id(running_entry)}`
+      - 마지막 event (UTC): `#{optional_utc_time(last_activity_timestamp(running_entry))}`
+      - 마지막 event (KST): `#{optional_kst_time(last_activity_timestamp(running_entry))}`
+      - 무응답 경과: `#{div(elapsed_ms, 1_000)}`초
+      - 자동 재시작 기준: `#{div(timeout_ms, 1_000)}`초
+      - 조치: workspace를 보존하고 worker를 중단한 뒤 backoff 후 새 실행을 시작합니다.
+      """
+      |> String.trim()
+
+    case Tracker.create_comment(running_entry.issue.id, body) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Failed to publish stale-worker Linear health event for #{issue_context(running_entry.issue)} reason=#{inspect(reason)}")
+    end
+  end
+
+  defp worker_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+  defp worker_alive?(_pid), do: false
+
+  defp activity_age_seconds(%DateTime{} = timestamp, %DateTime{} = now),
+    do: max(0, DateTime.diff(now, timestamp, :second))
+
+  defp activity_age_seconds(_timestamp, _now), do: 0
+
+  defp utc_time(%DateTime{} = datetime),
+    do: datetime |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+  defp kst_time(%DateTime{} = datetime) do
+    datetime
+    |> DateTime.add(9, :hour)
+    |> Calendar.strftime("%Y-%m-%dT%H:%M:%S+09:00")
+  end
+
+  defp optional_utc_time(%DateTime{} = datetime), do: utc_time(datetime)
+  defp optional_utc_time(_datetime), do: "아직 없음"
+
+  defp optional_kst_time(%DateTime{} = datetime), do: kst_time(datetime)
+  defp optional_kst_time(_datetime), do: "아직 없음"
 
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
@@ -841,9 +1123,178 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
+  defp request_operator_preempt(%State{} = state, issue_id, request_id) do
+    case Map.get(state.running, issue_id) do
+      %{preempt_request_id: existing_request_id} = running_entry
+      when is_binary(existing_request_id) ->
+        payload = %{
+          requested: true,
+          coalesced: true,
+          status: "interrupt_requested",
+          delivery: "turn_interrupt",
+          issue_id: issue_id,
+          request_id: existing_request_id,
+          requested_at: Map.get(running_entry, :preempt_requested_at),
+          grace_timeout_ms: @preempt_grace_ms
+        }
+
+        {payload, state}
+
+      %{pid: pid} = running_entry when is_pid(pid) ->
+        send(pid, {:operator_preempt, request_id})
+
+        requested_at = DateTime.utc_now()
+
+        timer_ref =
+          Process.send_after(
+            self(),
+            {:force_operator_preempt, issue_id, request_id},
+            @preempt_grace_ms
+          )
+
+        updated_entry =
+          running_entry
+          |> Map.put(:preempt_request_id, request_id)
+          |> Map.put(:preempt_requested_at, requested_at)
+          |> Map.put(:preempt_timer_ref, timer_ref)
+
+        payload = %{
+          requested: true,
+          coalesced: false,
+          status: "interrupt_requested",
+          delivery: "turn_interrupt",
+          issue_id: issue_id,
+          request_id: request_id,
+          requested_at: requested_at,
+          grace_timeout_ms: @preempt_grace_ms
+        }
+
+        {payload, %{state | running: Map.put(state.running, issue_id, updated_entry)}}
+
+      _other ->
+        request_non_running_preempt(state, issue_id, request_id)
+    end
+  end
+
+  defp request_non_running_preempt(%State{} = state, issue_id, request_id) do
+    cond do
+      Map.has_key?(state.blocked, issue_id) ->
+        {%{
+           requested: false,
+           coalesced: false,
+           status: "blocked_requires_unblock",
+           delivery: "blocked",
+           issue_id: issue_id,
+           request_id: request_id
+         }, state}
+
+      retry = Map.get(state.retry_attempts, issue_id) ->
+        timer_ref = Map.get(retry, :timer_ref)
+        if is_reference(timer_ref), do: Process.cancel_timer(timer_ref)
+        send(self(), {:retry_issue, issue_id, Map.fetch!(retry, :retry_token)})
+
+        {%{
+           requested: true,
+           coalesced: false,
+           status: "retry_woken",
+           delivery: "next_dispatch",
+           issue_id: issue_id,
+           request_id: request_id
+         }, state}
+
+      Enum.any?(state.queued, &(&1.id == issue_id)) ->
+        {%{
+           requested: true,
+           coalesced: false,
+           status: "queued_for_dispatch",
+           delivery: "next_dispatch",
+           issue_id: issue_id,
+           request_id: request_id
+         }, schedule_tick(state, 0)}
+
+      true ->
+        {%{
+           requested: true,
+           coalesced: false,
+           status: "refresh_requested",
+           delivery: "next_dispatch",
+           issue_id: issue_id,
+           request_id: request_id
+         }, schedule_tick(state, 0)}
+    end
+  end
+
+  defp force_operator_preempt(%State{} = state, issue_id, request_id) do
+    case Map.get(state.running, issue_id) do
+      %{preempt_request_id: ^request_id} = running_entry ->
+        Logger.warning("Codex turn did not acknowledge operator preemption within #{@preempt_grace_ms}ms; forcing worker restart issue_id=#{issue_id} request_id=#{request_id}")
+
+        stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
+
+        state
+        |> record_session_completion_totals(running_entry)
+        |> then(&%{&1 | running: Map.delete(&1.running, issue_id)})
+        |> continue_after_operator_preempt(issue_id, running_entry, request_id)
+
+      _other ->
+        state
+    end
+  end
+
+  defp schedule_preempted_issue_retry(state, issue_id, running_entry, request_id) do
+    issue_url = running_entry |> Map.get(:issue, %{}) |> Map.get(:url)
+
+    schedule_issue_retry(state, issue_id, 1, %{
+      identifier: Map.get(running_entry, :identifier, issue_id),
+      issue_url: issue_url,
+      error: "operator preempted the active run request_id=#{request_id}",
+      delay_type: :continuation,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
+  end
+
+  defp continue_after_operator_preempt(state, issue_id, running_entry, request_id) do
+    state = complete_issue(state, issue_id)
+
+    if human_intake_enabled?() do
+      audit("operator.preempt_requeued", "linear_issue", issue_id, %{
+        outcome: "scheduler_queue",
+        issue_identifier: Map.get(running_entry, :identifier, issue_id),
+        request_id: request_id
+      })
+
+      state
+      |> release_issue_claim(issue_id)
+      |> schedule_tick(0)
+    else
+      schedule_preempted_issue_retry(state, issue_id, running_entry, request_id)
+    end
+  end
+
+  defp human_intake_enabled? do
+    Config.settings!().intake.enabled
+  rescue
+    _error -> false
+  end
+
+  defp cancel_preempt_timer(running_entry) when is_map(running_entry) do
+    case Map.get(running_entry, :preempt_timer_ref) do
+      timer_ref when is_reference(timer_ref) -> Process.cancel_timer(timer_ref)
+      _other -> false
+    end
+  end
+
+  defp cancel_preempt_timer(_running_entry), do: false
+
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
+    stop_and_block_issue(state, issue_id, running_entry, error, :runtime)
+  end
+
+  defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error, block_type) do
+    cancel_preempt_timer(running_entry)
     stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
-    block_issue_from_entry(state, issue_id, running_entry, error, :runtime)
+    block_issue_from_entry(state, issue_id, running_entry, error, block_type)
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error, block_type) do
@@ -864,6 +1315,13 @@ defmodule SymphonyElixir.Orchestrator do
 
     maybe_publish_blocked_report(blocked_entry)
 
+    audit("agent.blocked", "linear_issue", issue_id, %{
+      outcome: "blocked",
+      issue_identifier: blocked_entry.identifier,
+      block_type: block_type,
+      error: error
+    })
+
     %{
       state
       | running: Map.delete(state.running, issue_id),
@@ -873,7 +1331,8 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp maybe_publish_blocked_report(%{block_type: :runtime} = blocked_entry) do
+  defp maybe_publish_blocked_report(%{block_type: block_type} = blocked_entry)
+       when block_type in [:runtime, :budget] do
     reviewer = Config.settings!().review.reviewer
 
     case reviewer_mention(reviewer) do
@@ -907,19 +1366,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp blocked_report(blocked_entry, reviewer) do
     """
-    ## Loophony Blocked — Human Input Required
+    ## Loophony Blocked — 사람 입력 필요
 
     <!-- loophony-blocked:#{blocked_entry.identifier}:#{blocked_entry.session_id} -->
     #{reviewer}
 
-    Loophony paused `#{blocked_entry.identifier}` because it requires human input before it can
-    continue.
+    `#{blocked_entry.identifier}` 작업을 계속하려면 사람의 입력이 필요해 Loophony가
+    일시정지했습니다.
 
-    - Reason: #{blocked_entry.error}
-    - Blocked at: #{DateTime.to_iso8601(blocked_entry.blocked_at)}
+    - 사유: #{blocked_entry.error}
+    - Blocked 시각: #{DateTime.to_iso8601(blocked_entry.blocked_at)}
 
-    Open Codex App and submit an explicit `unblock` instruction for this issue. Do not place
-    credentials or secrets in Linear.
+    Codex App에서 이 이슈에 명시적인 `unblock` 지침을 제출하세요. 자격 증명이나 secret은
+    Linear에 입력하지 마세요.
     """
     |> String.trim()
   end
@@ -990,12 +1449,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp queue_eligible_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed, blocked: blocked},
+         %State{running: running, claimed: claimed, blocked: blocked, goal_policy: goal_policy},
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      GoalPolicy.eligible?(goal_policy, issue) and
+      !automated_wait_active?(issue.id) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id)
@@ -1129,13 +1590,22 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
+        run_id = runtime_id()
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
+
+        audit("agent.dispatched", "linear_issue", issue.id, %{
+          issue_identifier: issue.identifier,
+          run_id: run_id,
+          attempt: attempt,
+          worker_host: worker_host || "local"
+        })
 
         running =
           Map.put(state.running, issue.id, %{
             pid: pid,
             ref: ref,
+            run_id: run_id,
             identifier: issue.identifier,
             issue: issue,
             worker_host: worker_host,
@@ -1200,7 +1670,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        linear_health_heartbeats: Map.delete(state.linear_health_heartbeats, issue_id)
     }
   end
 
@@ -1227,6 +1698,14 @@ defmodule SymphonyElixir.Orchestrator do
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+
+    audit("retry.scheduled", "linear_issue", issue_id, %{
+      outcome: "retry",
+      issue_identifier: identifier,
+      attempt: next_attempt,
+      delay_ms: delay_ms,
+      error: error
+    })
 
     %{
       state
@@ -1540,6 +2019,14 @@ defmodule SymphonyElixir.Orchestrator do
     max(@top_level_session_limit - map_size(state.running), 0)
   end
 
+  @spec preempt_issue(String.t(), String.t(), GenServer.server()) :: map() | :unavailable
+  def preempt_issue(issue_id, request_id, server \\ __MODULE__)
+      when is_binary(issue_id) and is_binary(request_id) do
+    GenServer.call(server, {:preempt_issue, issue_id, request_id})
+  catch
+    :exit, _reason -> :unavailable
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -1552,6 +2039,13 @@ defmodule SymphonyElixir.Orchestrator do
     else
       :unavailable
     end
+  end
+
+  @spec resume_issue(String.t(), GenServer.server()) :: map() | :unavailable
+  def resume_issue(issue_id, server \\ __MODULE__) when is_binary(issue_id) do
+    GenServer.call(server, {:resume_issue, issue_id})
+  catch
+    :exit, _reason -> :unavailable
   end
 
   @spec resume_after_review() :: map() | :unavailable
@@ -1596,6 +2090,7 @@ defmodule SymphonyElixir.Orchestrator do
           issue_id: issue_id,
           identifier: metadata.identifier,
           issue_url: metadata.issue.url,
+          run_id: Map.get(metadata, :run_id),
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
@@ -1609,6 +2104,7 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
+          preemption: running_preemption_payload(metadata),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
       end)
@@ -1660,14 +2156,43 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    waiting =
+      case RuntimeStore.active_waits(RuntimeStore, @snapshot_dependency_timeout_ms) do
+        {:ok, entries} -> entries
+        _ -> []
+      end
+
+    jobs =
+      case RuntimeStore.list_jobs(%{}, RuntimeStore, @snapshot_dependency_timeout_ms) do
+        {:ok, entries} -> Enum.take(entries, 50)
+        _ -> []
+      end
+
+    review_gate = review_gate_payload()
+
+    goal_policy =
+      Map.put(
+        state.goal_policy,
+        :review,
+        GoalPolicy.review_staleness(review_gate, state.goal_policy)
+      )
+
     {:reply,
      %{
        running: running,
        queued: queued,
        retrying: retrying,
        blocked: blocked,
+       waiting: waiting,
+       jobs: jobs,
        loop: LoopStore.summary(),
-       review_gate: review_gate_payload(),
+       review_gate: review_gate,
+       goal_policy: goal_policy,
+       intake: state.intake,
+       runtime: RuntimeStore.summary(RuntimeStore, @snapshot_dependency_timeout_ms),
+       budget: budget_snapshot(state),
+       memory: MemoryStore.status(MemoryStore, @snapshot_dependency_timeout_ms),
+       audit: AuditLog.summary(AuditLog, @snapshot_dependency_timeout_ms),
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1693,6 +2218,20 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
+  def handle_call({:preempt_issue, issue_id, request_id}, _from, state) do
+    {payload, next_state} = request_operator_preempt(state, issue_id, request_id)
+    notify_dashboard()
+    {:reply, payload, next_state}
+  end
+
+  def handle_call({:resume_issue, issue_id}, _from, state) do
+    blocked? = Map.has_key?(state.blocked, issue_id)
+    state = if blocked?, do: release_issue_claim(state, issue_id), else: state
+    state = schedule_tick(state, 0)
+
+    {:reply, %{released: blocked?, issue_id: issue_id}, state}
+  end
+
   def handle_call(:resume_after_review, _from, state) do
     state =
       state
@@ -1707,6 +2246,21 @@ defmodule SymphonyElixir.Orchestrator do
     case LoopStore.current_review_gate() do
       {:ok, gate} -> gate
       {:error, reason} -> %{status: "unavailable", error: inspect(reason)}
+    end
+  end
+
+  defp running_preemption_payload(metadata) do
+    case Map.get(metadata, :preempt_request_id) do
+      request_id when is_binary(request_id) ->
+        %{
+          status: "interrupt_requested",
+          request_id: request_id,
+          requested_at: Map.get(metadata, :preempt_requested_at),
+          grace_timeout_ms: @preempt_grace_ms
+        }
+
+      _other ->
+        nil
     end
   end
 
@@ -1840,11 +2394,37 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pop_running_entry(state, issue_id) do
-    {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
+    running_entry = Map.get(state.running, issue_id)
+    cancel_preempt_timer(running_entry)
+
+    {running_entry,
+     %{
+       state
+       | running: Map.delete(state.running, issue_id),
+         linear_health_heartbeats: Map.delete(state.linear_health_heartbeats, issue_id)
+     }}
   end
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
     runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
+
+    runtime_result =
+      RuntimeStore.finish_run(
+        Map.get(running_entry, :run_id, running_entry_session_id(running_entry)),
+        running_entry.issue.id,
+        running_entry.identifier,
+        runtime_seconds
+      )
+
+    if match?({:ok, %{runtime_recorded: true}}, runtime_result) do
+      audit("agent.finished", "linear_issue", running_entry.issue.id, %{
+        issue_identifier: running_entry.identifier,
+        run_id: Map.get(running_entry, :run_id),
+        session_id: running_entry_session_id(running_entry),
+        runtime_seconds: runtime_seconds,
+        total_tokens: Map.get(running_entry, :codex_total_tokens, 0)
+      })
+    end
 
     codex_totals =
       apply_token_delta(
@@ -1868,8 +2448,15 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state
       | poll_interval_ms: config.polling.interval_ms,
-        max_concurrent_agents: config.agent.max_concurrent_agents
+        max_concurrent_agents: config.agent.max_concurrent_agents,
+        linear_heartbeat_interval_ms: config.observability.linear_heartbeat_interval_ms
     }
+  end
+
+  defp runtime_id do
+    8
+    |> :crypto.strong_rand_bytes()
+    |> Base.encode16(case: :lower)
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
@@ -2210,6 +2797,265 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp running_seconds(_started_at, _now), do: 0
+
+  defp release_ready_waits(%State{} = state) do
+    case RuntimeStore.active_waits() do
+      {:ok, waits} ->
+        Enum.reduce(waits, state, &release_ready_wait/2)
+
+      {:error, reason} ->
+        Logger.warning("Unable to inspect automated waits: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp release_ready_wait(wait, state) do
+    case WaitCondition.ready?(wait) do
+      {:ready, reason} -> release_automated_wait(wait, reason, state)
+      :waiting -> state
+      {:error, reason} -> log_pending_wait(wait, reason, state)
+    end
+  end
+
+  defp release_automated_wait(wait, reason, state) do
+    case RuntimeStore.release_wait(wait.wait_id, reason) do
+      {:ok, _released} ->
+        Logger.info(
+          "Automated wait released for issue_id=#{wait.issue_id} " <>
+            "issue_identifier=#{wait.issue_identifier} reason=#{reason}"
+        )
+
+        release_issue_claim(state, wait.issue_id)
+
+      {:error, error} ->
+        Logger.warning("Unable to release automated wait wait_id=#{wait.wait_id}: #{inspect(error)}")
+
+        state
+    end
+  end
+
+  defp log_pending_wait(wait, reason, state) do
+    Logger.debug("Automated wait probe remains pending wait_id=#{wait.wait_id}: #{inspect(reason)}")
+
+    state
+  end
+
+  defp automated_wait_active?(issue_id) when is_binary(issue_id) do
+    match?({:ok, %{}}, RuntimeStore.active_wait(issue_id))
+  end
+
+  defp automated_wait_active?(_issue_id), do: false
+
+  defp persist_issue_token_usage(state, issue_id, running_entry, token_delta)
+       when is_binary(issue_id) and is_map(running_entry) and is_map(token_delta) do
+    if Map.get(token_delta, :total_tokens, 0) > 0 do
+      case RuntimeStore.add_token_usage(issue_id, running_entry.identifier, token_delta) do
+        {:ok, _usage} ->
+          state
+
+        {:error, reason} ->
+          Logger.warning("Unable to persist budget usage for issue_id=#{issue_id}: #{inspect(reason)}")
+          state
+      end
+    else
+      state
+    end
+  end
+
+  defp persist_issue_token_usage(state, _issue_id, _running_entry, _token_delta), do: state
+
+  defp enforce_running_budgets(%State{} = state) do
+    if Config.settings!().budget.enabled do
+      state.running
+      |> Map.keys()
+      |> Enum.reduce(state, &enforce_issue_budget(&2, &1))
+    else
+      state
+    end
+  end
+
+  defp enforce_issue_budget(%State{} = state, issue_id) do
+    case {Config.settings!().budget.enabled, Map.get(state.running, issue_id)} do
+      {true, %{} = running_entry} ->
+        case RuntimeStore.budget_usage(issue_id) do
+          {:ok, usage} ->
+            usage = add_current_runtime(usage, running_entry)
+            evaluation = BudgetPolicy.evaluate(usage)
+            apply_budget_evaluation(state, issue_id, running_entry, evaluation)
+
+          {:error, reason} ->
+            Logger.warning("Unable to evaluate budget for issue_id=#{issue_id}: #{inspect(reason)}")
+            state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp add_current_runtime(usage, running_entry) do
+    current_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
+    update_in(usage, [:issue, :runtime_seconds], &((&1 || 0) + current_seconds))
+  end
+
+  defp apply_budget_evaluation(state, issue_id, running_entry, %{status: "warning"} = evaluation) do
+    if is_nil(get_in(evaluation, [:usage, :issue, :warned_at])) do
+      _ = RuntimeStore.mark_budget_state(issue_id, "warned")
+
+      audit("budget.warning", "linear_issue", issue_id, %{
+        issue_identifier: running_entry.identifier,
+        maximum_percent: evaluation.maximum_percent,
+        metrics: evaluation.metrics
+      })
+    end
+
+    state
+  end
+
+  defp apply_budget_evaluation(
+         state,
+         issue_id,
+         running_entry,
+         %{status: "exhausted", action: "wait", exhausted_reasons: ["daily_tokens"]} = evaluation
+       ) do
+    unless get_in(evaluation, [:usage, :issue, :exhausted_at]) do
+      _ = RuntimeStore.mark_budget_state(issue_id, "exhausted")
+
+      audit("budget.exhausted", "linear_issue", issue_id, %{
+        outcome: "waiting",
+        issue_identifier: running_entry.identifier,
+        reasons: evaluation.exhausted_reasons,
+        metrics: evaluation.metrics
+      })
+    end
+
+    wake_at = next_utc_day_iso8601()
+
+    case RuntimeStore.register_wait(running_entry.issue, %{
+           reason: "daily execution budget exhausted",
+           wake_at: wake_at,
+           resume_hint: "Daily token budget reset; resume from the latest durable checkpoint."
+         }) do
+      {:ok, _wait} ->
+        cancel_preempt_timer(running_entry)
+        stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
+        state
+
+      {:error, reason} ->
+        Logger.warning("Unable to register daily-budget wait for issue_id=#{issue_id}: #{inspect(reason)}")
+        stop_and_block_issue(state, issue_id, running_entry, "daily execution budget exhausted", :budget)
+    end
+  end
+
+  defp apply_budget_evaluation(state, issue_id, running_entry, %{status: "exhausted"} = evaluation) do
+    unless get_in(evaluation, [:usage, :issue, :exhausted_at]) do
+      _ = RuntimeStore.mark_budget_state(issue_id, "exhausted")
+
+      audit("budget.exhausted", "linear_issue", issue_id, %{
+        outcome: "blocked",
+        issue_identifier: running_entry.identifier,
+        reasons: evaluation.exhausted_reasons,
+        metrics: evaluation.metrics
+      })
+    end
+
+    error = "configured execution budget exhausted: #{Enum.join(evaluation.exhausted_reasons, ", ")}"
+    stop_and_block_issue(state, issue_id, running_entry, error, :budget)
+  end
+
+  defp apply_budget_evaluation(state, _issue_id, _running_entry, _evaluation), do: state
+
+  defp next_utc_day_iso8601 do
+    Date.utc_today()
+    |> Date.add(1)
+    |> DateTime.new!(~T[00:00:00], "Etc/UTC")
+    |> DateTime.to_iso8601()
+  end
+
+  defp budget_snapshot(state) do
+    settings = Config.settings!().budget
+
+    if settings.enabled do
+      enabled_budget_snapshot(state, settings)
+    else
+      disabled_budget_snapshot(settings)
+    end
+  end
+
+  defp enabled_budget_snapshot(state, settings) do
+    daily =
+      case RuntimeStore.budget_usage(
+             "__summary__",
+             RuntimeStore,
+             @snapshot_dependency_timeout_ms
+           ) do
+        {:ok, usage} -> usage.daily
+        _ -> %{}
+      end
+
+    issues =
+      state.running
+      |> Enum.map(fn {issue_id, running_entry} ->
+        case RuntimeStore.budget_usage(
+               issue_id,
+               RuntimeStore,
+               @snapshot_dependency_timeout_ms
+             ) do
+          {:ok, usage} ->
+            usage
+            |> add_current_runtime(running_entry)
+            |> BudgetPolicy.evaluate()
+            |> Map.put(:issue_identifier, running_entry.identifier)
+
+          _ ->
+            %{
+              enabled: settings.enabled,
+              status: "unavailable",
+              issue_identifier: running_entry.identifier
+            }
+        end
+      end)
+
+    %{
+      enabled: settings.enabled,
+      limits: budget_limits(settings),
+      daily_usage: daily,
+      issues: issues
+    }
+  end
+
+  defp disabled_budget_snapshot(settings) do
+    %{
+      enabled: false,
+      limits: budget_limits(settings),
+      daily_usage: %{},
+      issues: []
+    }
+  end
+
+  defp budget_limits(settings) do
+    %{
+      max_tokens_per_issue: settings.max_tokens_per_issue,
+      max_tokens_per_day: settings.max_tokens_per_day,
+      max_active_seconds_per_issue: settings.max_active_seconds_per_issue,
+      warn_at_percent: settings.warn_at_percent,
+      on_exhausted: settings.on_exhausted
+    }
+  end
+
+  defp audit(action, resource_type, resource_id, metadata) do
+    outcome = Map.get(metadata, :outcome, "ok")
+
+    _ =
+      AuditLog.record_async(action, %{
+        outcome: outcome,
+        resource_type: resource_type,
+        resource_id: to_string(resource_id),
+        metadata: Map.delete(metadata, :outcome)
+      })
+
+    :ok
+  end
 
   defp integer_like(value) when is_integer(value) and value >= 0, do: value
 

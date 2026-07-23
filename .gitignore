@@ -1,2 +1,5 @@
 /plugins/loophony/node_modules/
 /plugins/loophony/dist/*.map
+/plugins/loophony/**/__pycache__/
+/elixir/**/__pycache__/
+/elixir/.env.onyx

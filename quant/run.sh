@@ -25,6 +25,7 @@ load_keychain_secret() {
 
 load_keychain_secret LINEAR_API_KEY linear-notifier-api-token
 load_keychain_secret LINEAR_API_KEY linear-api-token
+load_keychain_secret ONYX_API_KEY onyx-api-key
 load_keychain_secret APCA_API_KEY_ID alpaca-api-key-id
 load_keychain_secret APCA_API_SECRET_KEY alpaca-api-secret-key
 

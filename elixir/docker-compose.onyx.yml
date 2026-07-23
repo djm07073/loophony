@@ -1,0 +1,175 @@
+name: loophony-onyx
+
+x-onyx-environment: &onyx-environment
+  AUTH_TYPE: basic
+  FILE_STORE_BACKEND: postgres
+  POSTGRES_HOST: relational_db
+  OPENSEARCH_HOST: opensearch
+  REDIS_HOST: cache
+  MODEL_SERVER_HOST: inference_model_server
+  INDEXING_MODEL_SERVER_HOST: indexing_model_server
+  DOCUMENT_ENCODER_MODEL: intfloat/multilingual-e5-base
+  DOC_EMBEDDING_DIM: "768"
+  NORMALIZE_EMBEDDINGS: "true"
+  ASYM_QUERY_PREFIX: "query: "
+  ASYM_PASSAGE_PREFIX: "passage: "
+  DISABLE_TELEMETRY: "true"
+  LOG_LEVEL: info
+
+services:
+  api_server:
+    image: onyxdotapp/onyx-backend:v4.0.0
+    container_name: loophony-onyx-api
+    command: >-
+      /bin/sh -c "alembic upgrade head &&
+      uvicorn onyx.main:app --host 0.0.0.0 --port 8080"
+    env_file: .env.onyx
+    environment:
+      <<: *onyx-environment
+    depends_on:
+      relational_db:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+      inference_model_server:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8780:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    volumes:
+      - api_server_logs:/var/log/onyx
+    restart: unless-stopped
+
+  web_server:
+    image: onyxdotapp/onyx-web-server:v4.0.0
+    container_name: loophony-onyx-web
+    env_file: .env.onyx
+    environment:
+      INTERNAL_URL: http://api_server:8080
+    depends_on:
+      api_server:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8781:3000"
+    restart: unless-stopped
+
+  inference_model_server:
+    image: onyxdotapp/onyx-model-server:v4.0.0
+    container_name: loophony-onyx-inference
+    command: uvicorn model_server.main:app --host 0.0.0.0 --port 9000
+    env_file: .env.onyx
+    environment:
+      DOCUMENT_ENCODER_MODEL: intfloat/multilingual-e5-base
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:9000/api/health')"
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - inference_model_cache:/app/.cache/huggingface
+      - inference_model_server_logs:/var/log/onyx
+    restart: unless-stopped
+
+  indexing_model_server:
+    image: onyxdotapp/onyx-model-server:v4.0.0
+    container_name: loophony-onyx-indexing
+    command: uvicorn model_server.main:app --host 0.0.0.0 --port 9000
+    env_file: .env.onyx
+    environment:
+      DOCUMENT_ENCODER_MODEL: intfloat/multilingual-e5-base
+      INDEXING_ONLY: "True"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:9000/api/health')"
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - indexing_model_cache:/app/.cache/huggingface
+      - indexing_model_server_logs:/var/log/onyx
+    restart: unless-stopped
+
+  relational_db:
+    image: postgres:15.2-alpine
+    container_name: loophony-onyx-postgres
+    command: -c max_connections=250
+    shm_size: 1g
+    env_file: .env.onyx
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  opensearch:
+    image: opensearchproject/opensearch:3.6.0
+    container_name: loophony-opensearch
+    env_file: .env.onyx
+    environment:
+      discovery.type: single-node
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_ADMIN_PASSWORD}
+      OPENSEARCH_JAVA_OPTS: >-
+        -Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent --insecure
+          --user admin:$${OPENSEARCH_ADMIN_PASSWORD}
+          https://localhost:9200/_cluster/health >/dev/null
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    restart: unless-stopped
+
+  cache:
+    image: redis:7.4-alpine
+    container_name: loophony-onyx-redis
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /data
+    restart: unless-stopped
+
+volumes:
+  api_server_logs:
+  inference_model_cache:
+  inference_model_server_logs:
+  indexing_model_cache:
+  indexing_model_server_logs:
+  opensearch_data:
+  postgres_data:

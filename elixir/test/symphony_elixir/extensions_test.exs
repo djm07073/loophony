@@ -76,6 +76,23 @@ defmodule SymphonyElixir.ExtensionsTest do
       {:reply, Keyword.get(state, :refresh, :unavailable), state}
     end
 
+    def handle_call({:resume_issue, issue_id}, _from, state) do
+      {:reply, %{released: true, issue_id: issue_id}, state}
+    end
+
+    def handle_call({:preempt_issue, issue_id, request_id}, _from, state) do
+      {:reply,
+       %{
+         requested: true,
+         coalesced: false,
+         status: "interrupt_requested",
+         delivery: "turn_interrupt",
+         issue_id: issue_id,
+         request_id: request_id,
+         grace_timeout_ms: 30_000
+       }, state}
+    end
+
     def handle_call(:resume_after_review, _from, state) do
       {:reply, %{resumed: true, requested_at: DateTime.utc_now()}, state}
     end
@@ -201,6 +218,28 @@ defmodule SymphonyElixir.ExtensionsTest do
              SymphonyElixir.Tracker.resolve_issue("mt-1")
 
     assert {:error, :issue_not_found} = SymphonyElixir.Tracker.resolve_issue("MT-MISSING")
+
+    assert {:ok, %Issue{id: created_issue_id} = created_issue} =
+             SymphonyElixir.Tracker.create_issue(%{
+               source_issue_id: "issue-1",
+               state_name: "Todo",
+               title: "[Human] feedback",
+               description: "request",
+               priority: 2
+             })
+
+    assert created_issue.title == "[Human] feedback"
+    assert created_issue.priority == 2
+    assert_receive {:memory_tracker_issue_created, ^created_issue}
+
+    assert :ok =
+             SymphonyElixir.Tracker.create_issue_relation(
+               created_issue_id,
+               "issue-1",
+               "related"
+             )
+
+    assert_receive {:memory_tracker_issue_relation, ^created_issue_id, "issue-1", "related"}
     assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
     assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
@@ -225,6 +264,8 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, ["issue-1"]} = Adapter.fetch_issue_states_by_ids(["issue-1"])
     assert_receive {:fetch_issue_states_by_ids_called, ["issue-1"]}
+
+    flush_graphql_messages()
 
     Process.put(
       {FakeLinearClient, :graphql_result},
@@ -276,6 +317,40 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     Process.put({FakeLinearClient, :graphql_result}, :unexpected)
     assert {:error, :comment_create_failed} = Adapter.create_comment("issue-1", "odd")
+
+    flush_graphql_messages()
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [
+                 %{"body" => "first"},
+                 %{body: "second"},
+                 %{"body" => nil},
+                 %{"other" => "ignored"}
+               ]
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, ["first", "second"]} = Adapter.comment_bodies("issue-1")
+    assert_receive {:graphql_called, comments_query, %{issueId: "issue-1"}}
+    assert comments_query =~ "SymphonyCheckpointComments"
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+    assert {:error, :invalid_comment_response} = Adapter.comment_bodies("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :boom})
+    assert {:error, :boom} = Adapter.comment_bodies("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, :unexpected)
+    assert {:error, :unexpected} = Adapter.comment_bodies("issue-1")
 
     Process.put(
       {FakeLinearClient, :graphql_results},
@@ -352,6 +427,173 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "linear adapter creates copied-context issues and relations" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{
+                 "id" => "team-1",
+                 "states" => %{"nodes" => [%{"id" => "state-todo"}]}
+               },
+               "project" => %{"id" => "project-1"},
+               "assignee" => %{"id" => "user-1"},
+               "labels" => %{"nodes" => [%{"id" => "label-1"}, %{"name" => "ignored"}]}
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issueCreate" => %{
+               "success" => true,
+               "issue" => %{
+                 "id" => "human-1",
+                 "identifier" => "LOOP-100",
+                 "title" => "[Human] feedback",
+                 "description" => "request",
+                 "priority" => 1,
+                 "state" => %{"name" => "Todo"},
+                 "project" => %{"id" => "project-1"},
+                 "labels" => %{"nodes" => []}
+               }
+             }
+           }
+         }}
+      ]
+    )
+
+    assert {:ok, %Issue{id: "human-1", priority: 1}} =
+             Adapter.create_issue(%{
+               source_issue_id: "source-1",
+               state_name: "Todo",
+               title: "[Human] feedback",
+               description: "request",
+               priority: 1
+             })
+
+    assert_receive {:graphql_called, context_query, %{sourceIssueId: "source-1", stateName: "Todo"}}
+
+    assert context_query =~ "SymphonyIssueCreationContext"
+
+    assert_receive {:graphql_called, create_query, create_variables}
+    assert create_query =~ "SymphonyCreateIssue"
+    assert create_variables.teamId == "team-1"
+    assert create_variables.projectId == "project-1"
+    assert create_variables.stateId == "state-todo"
+    assert create_variables.assigneeId == "user-1"
+    assert create_variables.labelIds == ["label-1"]
+    assert create_variables.priority == 1
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"issueRelationCreate" => %{"success" => true}}}}
+    )
+
+    assert :ok = Adapter.create_issue_relation("work-1", "human-1", "related")
+
+    assert_receive {:graphql_called, relation_query, %{issueId: "work-1", relatedIssueId: "human-1", type: "related"}}
+
+    assert relation_query =~ "issueRelationCreate"
+  end
+
+  test "linear adapter reports issue creation and relation failure boundaries" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    assert {:error, :invalid_issue_create_attributes} = Adapter.create_issue(%{})
+
+    Process.put({FakeLinearClient, :graphql_results}, [{:error, :linear_down}])
+
+    assert {:error, :linear_down} =
+             Adapter.create_issue(%{source_issue_id: "source-1", state_name: "Todo"})
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [{:ok, %{"data" => %{"issue" => nil}}}]
+    )
+
+    assert {:error, :issue_creation_context_not_found} =
+             Adapter.create_issue(%{source_issue_id: "source-1", state_name: "Todo"})
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        issue_creation_context_result(),
+        {:ok, %{"data" => %{"issueCreate" => %{"success" => false}}}}
+      ]
+    )
+
+    assert {:error, :issue_create_failed} =
+             Adapter.create_issue(%{
+               source_issue_id: "source-1",
+               state_name: "Todo",
+               title: "request",
+               description: "body"
+             })
+
+    flush_graphql_messages()
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [issue_creation_context_result(), {:error, :mutation_down}]
+    )
+
+    assert {:error, :mutation_down} =
+             Adapter.create_issue(%{
+               source_issue_id: "source-1",
+               state_name: "Todo",
+               title: "request",
+               description: "body",
+               priority: 99
+             })
+
+    assert_receive {:graphql_called, _context_query, _context_variables}
+    assert_receive {:graphql_called, _create_query, %{priority: nil}}
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"issueRelationCreate" => %{"success" => false}}}}
+    )
+
+    assert {:error, :issue_relation_create_failed} =
+             Adapter.create_issue_relation("work-1", "human-1", "related")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :relation_down})
+
+    assert {:error, :relation_down} =
+             Adapter.create_issue_relation("work-1", "human-1", "related")
+  end
+
+  defp issue_creation_context_result do
+    {:ok,
+     %{
+       "data" => %{
+         "issue" => %{
+           "team" => %{
+             "id" => "team-1",
+             "states" => %{"nodes" => [%{"id" => "state-todo"}]}
+           },
+           "project" => %{"id" => "project-1"},
+           "assignee" => nil,
+           "labels" => %{"nodes" => []}
+         }
+       }
+     }}
+  end
+
+  defp flush_graphql_messages do
+    receive do
+      {:graphql_called, _query, _variables} -> flush_graphql_messages()
+    after
+      0 -> :ok
+    end
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -375,7 +617,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "queued" => 1, "retrying" => 1, "blocked" => 1},
+             "counts" => %{
+               "running" => 1,
+               "queued" => 1,
+               "retrying" => 1,
+               "blocked" => 1,
+               "waiting" => 0
+             },
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -388,6 +636,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "turn_count" => 7,
                  "last_event" => "notification",
                  "last_message" => "rendered",
+                 "run_id" => nil,
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
                  "last_event_at" => nil,
                  "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
@@ -432,6 +681,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "block_type" => nil
                }
              ],
+             "waiting" => [],
+             "jobs" => [],
+             "goal_policy" => nil,
+             "intake" => nil,
+             "runtime" => nil,
+             "budget" => nil,
+             "memory" => nil,
+             "audit" => nil,
              "loop" => %{
                "available" => true,
                "total_checkpoints" => 1,
@@ -488,6 +745,10 @@ defmodule SymphonyElixir.ExtensionsTest do
              "queue" => nil,
              "retry" => nil,
              "blocked" => nil,
+             "waiting" => nil,
+             "goal_policy" => nil,
+             "intake" => nil,
+             "budget" => nil,
              "loop" => %{
                "recent" => [
                  %{
@@ -565,6 +826,28 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert json_response(denied, 403)["error"]["code"] == "operator_access_denied"
 
+    invalid_priority =
+      build_conn()
+      |> Plug.Conn.put_req_header("x-loophony-control", "codex-app")
+      |> post("/api/v1/operator-input", %{
+        "kind" => "instruction",
+        "message" => "Re-check costs",
+        "priority" => 9
+      })
+
+    assert json_response(invalid_priority, 422)["error"]["code"] == "invalid_priority"
+
+    invalid_title =
+      build_conn()
+      |> Plug.Conn.put_req_header("x-loophony-control", "codex-app")
+      |> post("/api/v1/operator-input", %{
+        "kind" => "instruction",
+        "message" => "Re-check costs",
+        "title" => "  "
+      })
+
+    assert json_response(invalid_title, 422)["error"]["code"] == "invalid_title"
+
     accepted =
       build_conn()
       |> Plug.Conn.put_req_header("x-loophony-control", "codex-app")
@@ -588,8 +871,26 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert_receive {:memory_tracker_comment, "issue-http", comment}
     assert comment =~ "## Human Input"
+    assert comment =~ "제출 시각 (UTC)"
+    assert comment =~ "제출 시각 (KST)"
     assert comment =~ "symphony-human-input:request-1"
     assert comment =~ "Narrow the universe"
+
+    preempted =
+      build_conn()
+      |> Plug.Conn.put_req_header("x-loophony-control", "codex-app")
+      |> post("/api/v1/operator-input", %{
+        "kind" => "preempt",
+        "message" => "현재 turn을 중단하고 이 입력에서 다시 계획한다.",
+        "request_id" => "request-preempt-http"
+      })
+      |> json_response(202)
+
+    assert preempted["delivery"] == "turn_interrupt"
+    assert preempted["preemption"]["status"] == "interrupt_requested"
+    assert preempted["preemption"]["grace_timeout_ms"] == 30_000
+    assert_receive {:memory_tracker_comment, "issue-http", preempt_comment}
+    assert preempt_comment =~ "유형: `preempt`"
 
     resumed =
       build_conn()
@@ -604,7 +905,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert resumed["resumed_to"] == "Ready"
     assert_receive {:memory_tracker_comment, "issue-blocked", unblock_comment}
-    assert unblock_comment =~ "Kind: `unblock`"
+    assert unblock_comment =~ "유형: `unblock`"
     assert_receive {:memory_tracker_state_update, "issue-blocked", "Ready"}
   end
 
@@ -888,11 +1189,34 @@ defmodule SymphonyElixir.ExtensionsTest do
       operations: ["poll"]
     }
 
+    control_root =
+      Path.join(System.tmp_dir!(), "loophony-http-control-#{System.unique_integer([:positive])}")
+
+    audit_log = Module.concat(__MODULE__, :HttpAuditLog)
+    runtime_store = Module.concat(__MODULE__, :HttpRuntimeStore)
+    previous_endpoint_config = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint)
+
+    on_exit(fn ->
+      File.rm_rf(control_root)
+
+      if is_nil(previous_endpoint_config) do
+        Application.delete_env(:symphony_elixir, SymphonyElixirWeb.Endpoint)
+      else
+        Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous_endpoint_config)
+      end
+    end)
+
+    start_supervised!({SymphonyElixir.AuditLog, name: audit_log, path: Path.join(control_root, "audit.sqlite3"), enabled: true})
+
+    start_supervised!({SymphonyElixir.RuntimeStore, name: runtime_store, path: Path.join(control_root, "runtime.sqlite3"), enabled: true})
+
     server_opts = [
       host: "127.0.0.1",
       port: 0,
       orchestrator: orchestrator_name,
-      snapshot_timeout_ms: 50
+      snapshot_timeout_ms: 50,
+      audit_log: audit_log,
+      runtime_store: runtime_store
     ]
 
     start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: snapshot, refresh: refresh})
@@ -909,8 +1233,35 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => 1,
              "queued" => 1,
              "retrying" => 1,
-             "blocked" => 1
+             "blocked" => 1,
+             "waiting" => 0
            }
+
+    memory_status = Req.get!("http://127.0.0.1:#{port}/api/v1/memory/status")
+    assert memory_status.status == 200
+    assert memory_status.body["retrieval"] == "onyx-opensearch-hybrid"
+
+    audit = Req.get!("http://127.0.0.1:#{port}/api/v1/audit")
+    assert audit.status == 200
+    assert is_list(audit.body["events"])
+
+    audit_verify = Req.get!("http://127.0.0.1:#{port}/api/v1/audit/verify")
+    assert audit_verify.status == 200
+    assert audit_verify.body["valid"] == true
+
+    jobs = Req.get!("http://127.0.0.1:#{port}/api/v1/jobs")
+    waits = Req.get!("http://127.0.0.1:#{port}/api/v1/waits")
+    assert jobs.status == 200 and is_list(jobs.body["jobs"])
+    assert waits.status == 200 and is_list(waits.body["waits"])
+
+    unauthorized_stop = Req.post!("http://127.0.0.1:#{port}/api/v1/jobs/missing/stop")
+    assert unauthorized_stop.status == 403
+
+    invalid_memory_search =
+      Req.post!("http://127.0.0.1:#{port}/api/v1/memory/search", json: %{"query" => ""})
+
+    assert invalid_memory_search.status == 422
+    assert invalid_memory_search.body["error"]["code"] == "invalid_query"
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200

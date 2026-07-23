@@ -536,6 +536,7 @@ defmodule SymphonyElixir.AppServerTest do
                          "inputSchema" => %{"required" => required},
                          "name" => "symphony_loop_checkpoint"
                        }
+                       | _additional_tools
                      ] ->
                        description =~ "Linear" and loop_description =~ "SQLite" and
                          "checkpoint_key" in required
@@ -1374,6 +1375,92 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert_received {:app_server_message, %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
       assert_received {:app_server_message, %{event: :turn_completed}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server cooperatively interrupts an active turn for operator preemption" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-preempt-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-94")
+      codex_binary = Path.join(test_root, "fake-codex")
+      interrupt_log = Path.join(test_root, "interrupt.json")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-94"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-94"}}}'
+            ;;
+          5)
+            printf '%s\\n' "$line" > "#{interrupt_log}"
+            printf '%s\\n' '{"id":"loophony-preempt-request-94","result":{}}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"status":"interrupted"}}}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-preempt",
+        identifier: "MT-94",
+        title: "Operator preemption",
+        description: "Interrupt and restart from durable human input",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-94",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      task =
+        Task.async(fn ->
+          AppServer.run(workspace, "Wait for an operator instruction", issue, on_message: on_message)
+        end)
+
+      assert_receive {:app_server_message, %{event: :session_started}}, 2_000
+      send(task.pid, {:operator_preempt, "request-94"})
+
+      assert {:error, {:turn_preempted, "request-94"}} = Task.await(task, 5_000)
+      assert_receive {:app_server_message, %{event: :turn_preempt_requested}}
+      assert_receive {:app_server_message, %{event: :turn_preempted, preempt_request_id: "request-94"}}
+      refute_received {:app_server_message, %{event: :turn_ended_with_error}}
+
+      interrupt = interrupt_log |> File.read!() |> Jason.decode!()
+      assert interrupt["method"] == "turn/interrupt"
+      assert interrupt["params"] == %{"threadId" => "thread-94", "turnId" => "turn-94"}
     after
       File.rm_rf(test_root)
     end
