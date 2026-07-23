@@ -229,7 +229,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_tokens_per_day, :integer, default: 20_000_000)
       field(:max_active_seconds_per_issue, :integer, default: 3_600)
       field(:warn_at_percent, :integer, default: 70)
-      field(:on_exhausted, :string, default: "block")
+      field(:on_exhausted, :string, default: "warn")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -251,7 +251,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_tokens_per_day, greater_than: 0)
       |> validate_number(:max_active_seconds_per_issue, greater_than: 0)
       |> validate_number(:warn_at_percent, greater_than: 0, less_than_or_equal_to: 100)
-      |> validate_inclusion(:on_exhausted, ["block", "wait"])
+      |> validate_inclusion(:on_exhausted, ["warn", "block", "wait"])
     end
   end
 

@@ -882,7 +882,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.automation.database_path == Path.join(config.workspace.root, "_loop/loophony-runtime.sqlite3")
     assert config.automation.allowed_http_hosts == ["127.0.0.1", "localhost"]
     refute config.budget.enabled
-    assert config.budget.on_exhausted == "block"
+    assert config.budget.on_exhausted == "warn"
     refute config.goal_policy.enabled
     assert config.memory.health_probe_interval_ms == 60_000
     assert config.memory.failure_threshold == 2

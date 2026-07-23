@@ -529,12 +529,13 @@ Fields:
 - `max_tokens_per_day` (positive integer), default `20000000`
 - `max_active_seconds_per_issue` (positive integer), default `3600`
 - `warn_at_percent` (integer `1..100`), default `70`
-- `on_exhausted` (`block` or `wait`), default `block`
+- `on_exhausted` (`warn`, `block`, or `wait`), default `warn`
 
 Usage MUST be updated from monotonic Codex totals and completed run IDs MUST be idempotent. The
-runtime warns once at the configured threshold. Exhausted issue-token or runtime limits block.
-When `on_exhausted=wait`, a daily-token-only exhaustion MAY register a durable wait until the next
-UTC day; non-renewing issue limits still block.
+runtime warns once at the configured threshold. When `on_exhausted=warn`, exhaustion MUST append a
+one-time tracker warning and audit event without stopping the active worker. `block` remains an
+explicit fail-closed option. When `on_exhausted=wait`, a daily-token-only exhaustion MAY register a
+durable wait until the next UTC day; non-renewing issue limits still block.
 
 #### 5.3.11 `goal_policy` (object, OPTIONAL extension)
 
@@ -794,7 +795,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `budget.max_tokens_per_day`: positive integer, default `20000000`
 - `budget.max_active_seconds_per_issue`: positive integer, default `3600`
 - `budget.warn_at_percent`: integer, default `70`, valid range `1..100`
-- `budget.on_exhausted`: `block` or `wait`, default `block`
+- `budget.on_exhausted`: `warn`, `block`, or `wait`, default `warn`
 - `goal_policy.enabled`: boolean, default `false`
 - `goal_policy.require_goal_version`: boolean, default `true`
 - `goal_policy.require_active_stage`: boolean, default `true`

@@ -43,8 +43,9 @@ and OpenSearch 3.6 hybrid search let Codex answer natural-language questions acr
 - A separate append-only SQLite audit ledger records operator, scheduler, checkpoint, wait, job,
   budget, goal-review, and memory-health transitions. Each event is secret-redacted and linked to
   the previous event with a versioned canonical SHA-256 format so offline edits are detectable.
-- Configurable issue/day token and active-runtime budgets warn before exhaustion and either block
-  safely or wait for the next daily reset. The goal policy rejects ambiguous executable queues,
+- Configurable issue/day token and active-runtime budgets warn before and after exhaustion without
+  stopping work by default; explicit `block` and daily-reset `wait` policies remain available. The
+  goal policy rejects ambiguous executable queues,
   missing goal versions, and work that does not map to the single active stage.
 
 ## Set up from Codex App

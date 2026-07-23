@@ -651,6 +651,18 @@ defmodule SymphonyElixir.Orchestrator do
     select_worker_host(state, preferred_worker_host)
   end
 
+  @doc false
+  @spec apply_budget_evaluation_for_test(term(), String.t(), map(), map()) :: term()
+  def apply_budget_evaluation_for_test(
+        %State{} = state,
+        issue_id,
+        running_entry,
+        evaluation
+      )
+      when is_binary(issue_id) and is_map(running_entry) and is_map(evaluation) do
+    apply_budget_evaluation(state, issue_id, running_entry, evaluation)
+  end
+
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
 
   defp reconcile_running_issue_states([issue | rest], state, active_states, terminal_states) do
@@ -2916,6 +2928,28 @@ defmodule SymphonyElixir.Orchestrator do
          state,
          issue_id,
          running_entry,
+         %{status: "exhausted", action: "warn"} = evaluation
+       ) do
+    unless get_in(evaluation, [:usage, :issue, :exhausted_at]) do
+      _ = RuntimeStore.mark_budget_state(issue_id, "exhausted")
+
+      audit("budget.exhausted", "linear_issue", issue_id, %{
+        outcome: "warning",
+        issue_identifier: running_entry.identifier,
+        reasons: evaluation.exhausted_reasons,
+        metrics: evaluation.metrics
+      })
+
+      maybe_publish_budget_warning(running_entry, evaluation)
+    end
+
+    state
+  end
+
+  defp apply_budget_evaluation(
+         state,
+         issue_id,
+         running_entry,
          %{status: "exhausted", action: "wait", exhausted_reasons: ["daily_tokens"]} = evaluation
        ) do
     unless get_in(evaluation, [:usage, :issue, :exhausted_at]) do
@@ -2964,6 +2998,73 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp apply_budget_evaluation(state, _issue_id, _running_entry, _evaluation), do: state
+
+  defp maybe_publish_budget_warning(running_entry, evaluation) do
+    body =
+      budget_warning_report(
+        running_entry,
+        evaluation,
+        reviewer_mention(Config.settings!().review.reviewer)
+      )
+
+    case Tracker.create_comment(running_entry.issue.id, body) do
+      :ok ->
+        Logger.warning(
+          "Published non-blocking budget warning for issue_id=#{running_entry.issue.id} " <>
+            "issue_identifier=#{running_entry.identifier}"
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "Unable to publish non-blocking budget warning for " <>
+            "issue_identifier=#{running_entry.identifier}: #{inspect(reason)}"
+        )
+    end
+
+    :ok
+  end
+
+  defp budget_warning_report(running_entry, evaluation, reviewer) do
+    mention = if is_binary(reviewer), do: reviewer <> "\n\n", else: ""
+    detected_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+    """
+    ## Loophony Budget Warning — 작업 계속
+
+    <!-- loophony-budget-warning:#{running_entry.identifier} -->
+    #{mention}`#{running_entry.identifier}`가 설정된 실행 예산을 초과했습니다. 현재 정책은
+    `budget.on_exhausted: warn`이므로 작업을 중단하지 않고 계속합니다.
+
+    #{budget_metric_lines(evaluation.metrics)}
+
+    - 초과 항목: #{Enum.join(evaluation.exhausted_reasons, ", ")}
+    - 감지 시각: #{detected_at}
+
+    이 경고는 audit log와 이 이슈에 한 번만 기록됩니다. 진행 상황과 토큰 사용량을
+    Codex App의 Loophony 상태에서 계속 확인할 수 있습니다.
+    """
+    |> String.trim()
+  end
+
+  defp budget_metric_lines(metrics) do
+    [
+      budget_metric_line(metrics, :issue_tokens, "이슈 토큰"),
+      budget_metric_line(metrics, :daily_tokens, "일일 토큰"),
+      budget_metric_line(metrics, :issue_runtime_seconds, "이슈 실행 시간(초)")
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp budget_metric_line(metrics, key, label) do
+    case Map.get(metrics, key) do
+      %{used: used, limit: limit, percent: percent} ->
+        "- #{label}: #{used} / #{limit} (#{percent}%)"
+
+      _ ->
+        nil
+    end
+  end
 
   defp next_utc_day_iso8601 do
     Date.utc_today()

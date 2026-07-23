@@ -129,7 +129,7 @@ budget:
   max_tokens_per_day: 20000000
   max_active_seconds_per_issue: 3600
   warn_at_percent: 70
-  on_exhausted: block
+  on_exhausted: warn
 goal_policy:
   enabled: true
 memory:
@@ -211,8 +211,9 @@ Notes:
   Work is open, avoiding a second In Progress record. A terminal Work issue moves its source Human
   issue to `intake.completed_state`. Human and Work descriptions inherit the source issue's mapped
   goal stage so goal-policy validation remains valid.
-- `budget.on_exhausted: block` fails closed. `wait` pauses a daily-token-only exhaustion until the
-  next UTC day; issue token or runtime limits remain non-renewing and therefore block.
+- `budget.on_exhausted: warn` records a one-time Linear warning and audit event while work
+  continues. `block` remains an explicit fail-closed option. `wait` pauses a daily-token-only
+  exhaustion until the next UTC day; issue token or runtime limits still block in `wait` mode.
 - `goal_policy` can require a versioned goal, exactly one active `SC-XX` stage, at most one
   executable `In Progress` issue, and exact issue-to-stage mappings before dispatch. Any number of
   aligned `Todo` issues may wait; when one issue is already `In Progress`, only that issue is

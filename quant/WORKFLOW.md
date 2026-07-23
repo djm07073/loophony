@@ -40,7 +40,7 @@ budget:
   max_tokens_per_day: 20000000
   max_active_seconds_per_issue: 3600
   warn_at_percent: 70
-  on_exhausted: block
+  on_exhausted: warn
 goal_policy:
   enabled: true
   require_goal_version: true

@@ -271,6 +271,7 @@ defmodule SymphonyElixir.DurableRuntimeTest do
       )
 
     assert warning.status == "warning"
+    assert warning.action == "warn"
 
     exhausted =
       BudgetPolicy.evaluate(

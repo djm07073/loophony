@@ -963,6 +963,63 @@ defmodule SymphonyElixir.CoreTest do
     Process.cancel_timer(scheduled_state.tick_timer_ref)
   end
 
+  test "warning-only budget exhaustion keeps the active issue running and posts one notice" do
+    issue = %Issue{
+      id: "budget-warning-issue",
+      identifier: "MT-BUDGET-WARN",
+      state: "In Progress"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      review_reviewer: "@owner"
+    )
+
+    running_entry = %{
+      identifier: issue.identifier,
+      issue: issue,
+      started_at: DateTime.utc_now()
+    }
+
+    state = %Orchestrator.State{
+      running: %{issue.id => running_entry},
+      claimed: MapSet.new([issue.id])
+    }
+
+    evaluation = %{
+      status: "exhausted",
+      action: "warn",
+      exhausted_reasons: ["issue_tokens"],
+      metrics: %{
+        issue_tokens: %{used: 101, limit: 100, percent: 101, exhausted: true},
+        daily_tokens: %{used: 101, limit: 1_000, percent: 10, exhausted: false},
+        issue_runtime_seconds: %{used: 10, limit: 100, percent: 10, exhausted: false}
+      },
+      usage: %{issue: %{exhausted_at: nil}}
+    }
+
+    next_state =
+      Orchestrator.apply_budget_evaluation_for_test(
+        state,
+        issue.id,
+        running_entry,
+        evaluation
+      )
+
+    assert Map.has_key?(next_state.running, issue.id)
+    assert next_state.blocked == %{}
+
+    assert_receive {:memory_tracker_comment, "budget-warning-issue", warning}
+    assert warning =~ "Loophony Budget Warning — 작업 계속"
+    assert warning =~ "@owner"
+    assert warning =~ "101 / 100 (101%)"
+    assert warning =~ "작업을 중단하지 않고 계속합니다"
+    refute warning =~ "unblock"
+  end
+
   test "agent runner does not continue after a required label is removed" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
 
