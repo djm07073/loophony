@@ -574,6 +574,10 @@ one-time tracker warning and audit event without stopping the active worker. `bl
 explicit fail-closed option. When `on_exhausted=wait`, a daily-token-only exhaustion MAY register a
 durable wait until the next UTC day; non-renewing issue limits still block.
 
+When `enabled=false`, token and runtime usage MUST still be accumulated durably and included in the
+append-only `agent.finished` audit event, but the runtime MUST NOT evaluate thresholds, publish
+tracker notices, register budget waits, stop work, or block an issue.
+
 #### 5.3.12 `goal_policy` (object, OPTIONAL extension)
 
 Fields:

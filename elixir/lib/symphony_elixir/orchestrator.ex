@@ -16,6 +16,7 @@ defmodule SymphonyElixir.Orchestrator do
     HumanIntake,
     LoopStore,
     MemoryStore,
+    OperatorHandoffRecovery,
     RuntimeStore,
     StatusDashboard,
     Tracker,
@@ -369,6 +370,7 @@ defmodule SymphonyElixir.Orchestrator do
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
       issues = Enum.reject(issues, &HumanIntake.human_issue?/1)
+      issues = reconcile_operator_handoff_overlap(issues)
       {eligible_issues, state} = apply_goal_policy(issues, state)
       choose_issues_or_pause_for_review(eligible_issues, state)
     else
@@ -409,6 +411,17 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
         state
+    end
+  end
+
+  defp reconcile_operator_handoff_overlap(issues) do
+    case OperatorHandoffRecovery.reconcile(issues) do
+      {:ok, reconciled} ->
+        reconciled
+
+      {:error, reason} ->
+        Logger.warning("Operator handoff overlap recovery failed: #{inspect(reason)}")
+        issues
     end
   end
 
@@ -2443,6 +2456,8 @@ defmodule SymphonyElixir.Orchestrator do
         run_id: Map.get(running_entry, :run_id),
         session_id: running_entry_session_id(running_entry),
         runtime_seconds: runtime_seconds,
+        input_tokens: Map.get(running_entry, :codex_input_tokens, 0),
+        output_tokens: Map.get(running_entry, :codex_output_tokens, 0),
         total_tokens: Map.get(running_entry, :codex_total_tokens, 0)
       })
     end

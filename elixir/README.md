@@ -226,6 +226,9 @@ Notes:
 - `budget.on_exhausted: warn` records a one-time Linear warning and audit event while work
   continues. `block` remains an explicit fail-closed option. `wait` pauses a daily-token-only
   exhaustion until the next UTC day; issue token or runtime limits still block in `wait` mode.
+- `budget.enabled: false` is observation-only: token/runtime totals continue to be persisted and
+  each completed run records input, output, total tokens, and runtime in the append-only audit log,
+  while no budget notice, wait, stop, or Blocked transition is produced.
 - `goal_policy` can require a versioned goal, exactly one active `SC-XX` stage, at most one
   executable `In Progress` issue, and exact issue-to-stage mappings before dispatch. Any number of
   aligned `Todo` issues may wait; when one issue is already `In Progress`, only that issue is

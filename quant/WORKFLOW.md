@@ -42,7 +42,7 @@ handoff:
     - gpt-5.6-sol
     - gpt-5.3-codex-spark
 budget:
-  enabled: true
+  enabled: false
   max_tokens_per_issue: 5000000
   max_tokens_per_day: 20000000
   max_active_seconds_per_issue: 3600
@@ -152,6 +152,11 @@ No description was provided.
 
 - Symphony owns polling, claims, concurrency, retries, queue selection, workspaces, and Codex
   sessions.
+- Never move another issue to `In Progress` from a worker session. Leave every successor in `Todo`;
+  Symphony promotes exactly one issue only after the current issue is terminal. For an explicit
+  operator control transition to a pre-existing issue, keep that issue in `Todo` and close the
+  current Work issue with a terminal checkpoint whose `next_action` contains
+  `termination_reason=operator_control_transition_completed` and names the selected issue.
 - Linear is the durable control plane and the human-facing history.
 - This team uses Linear's standard `Todo` state as the Candidate/Ready queue state. Any number of
   aligned Todo issues may wait, but at most one executable issue may be `In Progress`.
